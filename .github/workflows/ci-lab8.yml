@@ -1,0 +1,92 @@
+name: ci-lab8
+# Fork-only measurement lab 8: what the configure step spends time on, and what a pre-extracted Boost source saves.
+on:
+  push:
+    branches: ["ci/lab8-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  configure:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1plus.exe','cc1.exe','as.exe','ld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Toolchain
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
+          pacman --noconfirm -U ${opus_tarball}
+      - name: Configure with timestamps (Boost fetched)
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab8
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab8
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s)
+          cmake --log-timestamp -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure-a.log 2>&1
+          echo "configure A (Boost downloaded and extracted by FetchContent): $(( $(date +%s) - start )) s"
+          grep -E "Boost v|Downloading|Performing download|boost-src|FETCHCONTENT" configure-a.log | head -4 | cut -c1-160
+          awk '{print $1}' configure-a.log | head -1 >/dev/null
+          # phases: lines with timestamps
+          grep -E "^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+ .*(Boost|Granite|pyrowave|ViGEm|FetchDriverDeps|Downloading|FetchGUI|Build identity|Configuring done|Generating done)" configure-a.log | head -12 | cut -c1-170
+          ls build/_deps | head
+          rm -rf build
+      - name: Download and extract Boost once (what a cache would restore)
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          v=1.92.0
+          wget -q "https://github.com/boostorg/boost/releases/download/boost-$v/boost-$v-cmake.tar.xz" -O boost.tar.xz
+          echo "boost download: $(( $(date +%s) - start )) s size=$(stat -c %s boost.tar.xz)"
+          start=$(date +%s); mkdir -p "$RUNNER_TEMP/boost-src" && tar -xf boost.tar.xz -C "$RUNNER_TEMP/boost-src" --strip-components=1
+          echo "boost extract: $(( $(date +%s) - start )) s"; du -sh "$RUNNER_TEMP/boost-src" | tail -1
+          start=$(date +%s); tar -cf - -C "$RUNNER_TEMP" boost-src | zstd -3 -q -o boost-src.tar.zst; echo "zstd pack: $(( $(date +%s) - start )) s size=$(stat -c %s boost-src.tar.zst)"
+          start=$(date +%s); rm -rf "$RUNNER_TEMP/boost-src"; zstd -d -q -c boost-src.tar.zst | tar -xf - -C "$RUNNER_TEMP"; echo "zstd unpack (cache restore equivalent): $(( $(date +%s) - start )) s"
+      - name: Configure with the pre-extracted Boost
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab8
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab8
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s)
+          cmake --log-timestamp -B build -G Ninja -S . -DFETCHCONTENT_SOURCE_DIR_BOOST="$RUNNER_TEMP/boost-src" -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure-b.log 2>&1
+          echo "configure B (FETCHCONTENT_SOURCE_DIR_BOOST): $(( $(date +%s) - start )) s"
+          tail -3 configure-b.log
