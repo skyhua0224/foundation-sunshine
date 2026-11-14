@@ -3893,7 +3893,13 @@ namespace stream {
 
               frame_send_batch_latency_logger.first_point_now();
               // Use a batched send if it's supported on this platform
-              if (!platf::send_batch(batch_info)) {
+              // A false result means this batch was not submitted. Only the
+              // fallback sends below, when they succeed, handed bytes to the socket.
+              std::size_t sent_packets = 0;
+              if (platf::send_batch(batch_info)) {
+                sent_packets = current_batch_size;
+              }
+              else {
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
@@ -3908,7 +3914,19 @@ namespace stream {
                     session->localAddress,
                   };
 
-                  platf::send(send_info);
+                  if (platf::send(send_info)) {
+                    ++sent_packets;
+                  }
+                }
+              }
+              if (sent_packets != 0) {
+                note_measured_send(session, static_cast<std::uint64_t>(shards.prefixsize + shards.blocksize) * sent_packets);
+                if (!session->first_video_packet_logged.exchange(true)) {
+                  BOOST_LOG(info) << "First video packet sent: frame "sv << packet->frame_index()
+                                  << (packet->is_idr() ? " (key frame)"sv : ""sv)
+                                  << (frame_is_dupe ? " (repeat of the previous picture)"sv : ""sv) << ", "sv
+                                  << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - session->created_at).count()
+                                  << " ms after the session was created"sv;
                 }
               }
               frame_send_batch_latency_logger.second_point_now_and_log();
@@ -4070,7 +4088,13 @@ namespace stream {
           session->audio.peer.port(),
           session->localAddress,
         };
-        const bool audio_sent = platf::send(send_info);
+        // The audio peer's port stays 0 until the client's audio ping arrives. Audio that is encoded before that has
+        // no destination: sending it floods the log with WSAEFAULT (10014) and gets no data to the client either way.
+        const bool peer_known = session->audio.peer.port() != 0;
+        const bool audio_sent = peer_known && platf::send(send_info);
+        if (audio_sent) {
+          note_measured_send(session, sizeof(audio_packet) + static_cast<std::uint64_t>(bytes));
+        }
         if (!audio_sent && audio::is_mat_codec(session->config.audio.codec)) session->audio.mat_send_failed.store(true);
 
         auto &fec_packet = session->audio.fec_packet;
@@ -4098,7 +4122,10 @@ namespace stream {
               session->audio.peer.port(),
               session->localAddress,
             };
-            const bool parity_sent = platf::send(send_info);
+            const bool parity_sent = peer_known && platf::send(send_info);
+            if (parity_sent) {
+              note_measured_send(session, sizeof(fec_packet) + static_cast<std::uint64_t>(bytes));
+            }
             if (!parity_sent && audio::is_mat_codec(session->config.audio.codec)) session->audio.mat_send_failed.store(true);
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
           }
