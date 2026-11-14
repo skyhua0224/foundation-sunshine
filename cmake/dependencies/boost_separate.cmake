@@ -15,7 +15,10 @@ if(SUNSHINE_BOOST_SEPARATE_COMPILATION AND TARGET Boost::asio AND TARGET Boost::
     set_target_properties(sunshine_boost_separate PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
     target_link_libraries(sunshine_boost_separate PUBLIC Boost::asio Boost::beast OpenSSL::SSL OpenSSL::Crypto)
     if(WIN32)
-        target_link_libraries(sunshine_boost_separate PUBLIC ws2_32 mswsock)
+        # The separately compiled implementation needs its system libraries wherever it is linked, and it is linked into every
+        # target: BCryptGenRandom (random bytes for websocket masking and TLS seeding) comes from bcrypt, the static OpenSSL
+        # in it needs crypt32.
+        target_link_libraries(sunshine_boost_separate PUBLIC ws2_32 mswsock bcrypt crypt32)
     endif()
     link_libraries(sunshine_boost_separate)
 endif()
