@@ -1,0 +1,108 @@
+name: ci-lab4
+# Fork-only measurement lab 4: Web UI job cost on Linux vs Windows, installer setup UI build with and without cache, path-filter job.
+on:
+  push:
+    branches: ["ci/lab4-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  changes:
+    name: changed files (ubuntu-slim)
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - name: Changed files through the REST API (no checkout, no third-party action)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s%N)
+          gh api "repos/${GITHUB_REPOSITORY}/compare/${{ github.event.before }}...${{ github.sha }}" --paginate --jq '.files[].filename' > changed.txt || true
+          wc -l changed.txt; head -5 changed.txt
+          echo "api ms: $(( ($(date +%s%N) - start) / 1000000 ))"
+
+  webui:
+    name: webui ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: foundation-ui sibling
+        run: |
+          s=$(date +%s)
+          git clone -q --depth 1 https://github.com/AlkaidLab/foundation-ui "$GITHUB_WORKSPACE/../ds5-ui-m3e"
+          npm ci --omit=dev --omit=peer --prefix "$GITHUB_WORKSPACE/../ds5-ui-m3e" --no-audit --no-fund
+          echo "foundation-ui: $(( $(date +%s) - s )) s"
+      - name: npm ci
+        run: s=$(date +%s); npm ci --no-audit --no-fund; echo "npm ci: $(( $(date +%s) - s )) s"
+      - name: lint
+        run: s=$(date +%s); npm run lint:webui; echo "lint: $(( $(date +%s) - s )) s"
+      - name: tests (junit + spec)
+        run: |
+          s=$(date +%s)
+          node --import foundation-ui/testing/no-network --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=webui-junit.xml "src_assets/common/assets/web/tests/*.test.js" | tail -12
+          echo "tests: $(( $(date +%s) - s )) s"
+      - name: i18n validate
+        run: s=$(date +%s); npm run i18n:validate | tail -3; echo "i18n: $(( $(date +%s) - s )) s"
+      - name: build
+        run: |
+          s=$(date +%s); mkdir -p build
+          SUNSHINE_SOURCE_ASSETS_DIR="$GITHUB_WORKSPACE/src_assets" SUNSHINE_ASSETS_DIR="$GITHUB_WORKSPACE/build" npm run build | tail -3
+          echo "vite build: $(( $(date +%s) - s )) s"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webui-${{ matrix.os }}
+          path: webui-junit.xml
+
+  setup-ui:
+    name: installer setup UI (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Panel submodule only
+        run: git submodule update --init --depth 1 --filter=blob:none src_assets/common/sunshine-control-panel
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Cargo cache
+        id: cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src_assets/common/sunshine-control-panel/installer-ui/target
+          key: cargo-setupui-${{ hashFiles('src_assets/common/sunshine-control-panel/installer-ui/Cargo.lock') }}
+      - name: foundation-ui sibling
+        run: |
+          git clone -q --depth 1 https://github.com/AlkaidLab/foundation-ui "$GITHUB_WORKSPACE/../ds5-ui-m3e"
+          npm ci --omit=dev --omit=peer --prefix "$GITHUB_WORKSPACE/../ds5-ui-m3e" --no-audit --no-fund
+      - name: Build setup UI
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./scripts/build-setup-ui.ps1 -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" -Output "$env:RUNNER_TEMP/setup-ui/foundation-setup-ui.exe"
+          "setup ui build (cache hit: ${{ steps.cargo.outputs.cache-hit }}): $([int]$sw.Elapsed.TotalSeconds) s"
+          (Get-Item "$env:RUNNER_TEMP/setup-ui/foundation-setup-ui.exe").Length
+      - name: Fetch pinned installer inputs
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          ./scripts/fetch-installer-inputs.ps1 -Destination "$env:RUNNER_TEMP/pinned"
+          "fetch inputs: $([int]$sw.Elapsed.TotalSeconds) s"
