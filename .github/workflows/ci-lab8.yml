@@ -53,7 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           start=$(date +%s)
-          cmake --log-timestamp -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
             -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure-a.log 2>&1 || { tail -25 configure-a.log; exit 1; }
           echo "configure A (Boost downloaded and extracted by FetchContent): $(( $(date +%s) - start )) s"
           grep -E "Boost v|Downloading|Performing download|boost-src|FETCHCONTENT" configure-a.log | head -4 | cut -c1-160 || true
@@ -86,7 +86,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           start=$(date +%s)
-          cmake --log-timestamp -B build -G Ninja -S . -DFETCHCONTENT_SOURCE_DIR_BOOST="$RUNNER_TEMP/boost-src" -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+          cmake -B build -G Ninja -S . -DFETCHCONTENT_SOURCE_DIR_BOOST="$RUNNER_TEMP/boost-src" -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
             -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure-b.log 2>&1 || { tail -25 configure-b.log; exit 1; }
           echo "configure B (FETCHCONTENT_SOURCE_DIR_BOOST): $(( $(date +%s) - start )) s"
           tail -3 configure-b.log
