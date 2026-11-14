@@ -36,7 +36,7 @@ jobs:
         with:
           msystem: ucrt64
           release: false
-          update: false
+          update: true
           install: wget
       - name: Minimal toolchain (no gdb, graphviz, autotools)
         shell: msys2 {0}
@@ -45,8 +45,8 @@ jobs:
           opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
           wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
           P=mingw-w64-ucrt-x86_64
-          pacman -Syu --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
-            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl
+          pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
           pacman --noconfirm -U ${opus_tarball}
           echo "pacman minimal wall: $(( $(date +%s) - start )) s; packages installed: $(pacman -Q | wc -l)"
           g++ --version | head -1; cmake --version | head -1
