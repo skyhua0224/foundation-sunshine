@@ -49,7 +49,7 @@ jobs:
           wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
           P=mingw-w64-ucrt-x86_64
           pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
-            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
           pacman --noconfirm -U ${opus_tarball}
           echo "pacman minimal wall: $(( $(date +%s) - start )) s; packages installed: $(pacman -Q | wc -l)"
           g++ --version | head -1; cmake --version | head -1
