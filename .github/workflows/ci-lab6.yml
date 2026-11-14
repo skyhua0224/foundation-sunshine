@@ -1,21 +1,14 @@
 name: ci-lab6
-# Which commit date does the push event report as commits[0].timestamp?
 on:
   push:
     branches: ["ci/lab6-**"]
 permissions:
   contents: read
 jobs:
-  stamp:
+  slim:
     runs-on: ubuntu-slim
     steps:
-      - uses: actions/checkout@v7
-      - name: Compare the push payload with the commit
-        env:
-          PAYLOAD_TS: ${{ github.event.commits[0].timestamp }}
-          AFTER: ${{ github.event.after }}
-        run: |
-          echo "payload commits[0].timestamp = $PAYLOAD_TS"
-          echo "git author date    = $(git log -1 --format=%aI)"
-          echo "git committer date = $(git log -1 --format=%cI)"
-          echo "sha=$GITHUB_SHA after=$AFTER"
+      - run: |
+          for t in python3 jq gh git curl bash node; do printf '%s: ' "$t"; command -v "$t" || echo missing; done
+          python3 -c "import yaml; print('pyyaml', yaml.__version__)" || echo "pyyaml missing"
+          python3 --version; nproc; free -m | head -2
