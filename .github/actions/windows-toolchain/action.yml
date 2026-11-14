@@ -13,6 +13,10 @@ runs:
     - name: Defender exclusions
       shell: pwsh
       run: |
+        # Hosted runners differ in speed from run to run (timings of the same build varied by up to 1.5x), so every run
+        # records the machine it got next to its timings.
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        "### Runner`n- CPU: $($cpu.Name), $($cpu.NumberOfLogicalProcessors) logical processors, $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)) GB RAM`n- Image: $env:ImageVersion" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
         Add-MpPreference -ExclusionPath 'C:\msys64', $env:GITHUB_WORKSPACE, 'D:\a', $env:RUNNER_TEMP
         Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1.exe','cc1plus.exe','clang.exe','clang++.exe','as.exe','ld.exe','ld.lld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe','iscc.exe'
 
