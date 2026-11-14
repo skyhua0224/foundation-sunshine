@@ -42,13 +42,21 @@
 | F11 | 组织为 GitHub Free:没有 larger runners;合并队列对"组织拥有的公开仓库"可用;规则集 `FOR_CI` 未启用,没有必需检查 | `gh api` | §6.3、§8 |
 | F12 | `main.yml` 的 "Package Windows" 步骤末尾有孤立的 `echo/exit 1/fi`,bash 语法错误 → 该步骤从来不可能成功;actionlint 不检查 `msys2 {0}` 步骤 | `bash -n` 报 `syntax error near unexpected token 'fi'` | **已实现** `check-workflow-shell.py` 对所有 run 块做 `bash -n`;**已修** `a4d590c0`(与 #1254 的删除相同) |
 | F13 | 构建隐含依赖:`python` 原本只经 `gdb` 间接安装,CMake 打包配置需要它;`diffutils` 同理 | 最小包列表 configure 失败 | 显式包列表;**但包数量本身不是收益**:61–87 s 对 65–99 s(镜像自带 MSYS2 已有 182 个包) |
-| F14 | **测试可执行文件重复编译主机源码** | 编译 CPU 的 38.3% 是测试再编译主机源码。改为一个 OBJECT 库后(同一 GCC,同一虚拟机类型):**冷构建 3449 → 2050 s(−41%)**;**热构建(全部目标文件删除、提交变化、热 ccache)171 → 85–92 s(−46%)**;编译边 1277 → 1012;**86/86 测试通过**;`ctest` 57 → 51 s | **已实现** `777a7c4b`(Windows 且带测试时启用;`-DSUNSHINE_SHARE_HOST_OBJECTS=OFF` 恢复旧布局) |
-| F15 | Clang 与 GCC 的速度 | 同一 1250 个共同目标文件:一次运行 clang 比 gcc 少 31% CPU(墙钟 2375 对 3443 s);**另一次运行 clang 反而是 gcc 的 1.05 倍(每条边都慢 1.51 倍)**,而 gcc 两次一致 | **结论未定**:等待 lab-14 同一虚拟机交错重复。Clang 暴露 3 个真实的标准符合性问题(已修,见 F16) |
+| F14 | **测试可执行文件重复编译主机源码** | 编译 CPU 的 38.3% 是测试再编译主机源码。改为一个 OBJECT 库后:**同一虚拟机、无编译缓存、冷构建 ON 2094 s / OFF 2757 s / ON 2031 s(−25%,两次 ON 相差 3%)**,编译边 1290 → 1024;热构建(全部目标文件删除、提交变化、热 ccache)171 → 85–92 s(−46%);**86/86 测试通过**。(早先"−41%"那次单次对比混入了快虚拟机,不再引用) | **已实现** `777a7c4b`(Windows 且带测试时启用;`-DSUNSHINE_SHARE_HOST_OBJECTS=OFF` 恢复旧布局) |
+| F15 | Clang 与 GCC 编译速度 | 同一虚拟机交错 3 次(lab-14,24 个编译单元,`-j4`,无缓存):clang 105.2 s 对 gcc 149.2 s(**0.705×**,−29.5%);另一虚拟机 clang 166–168 s 对 gcc 222–224 s(0.74×);lab-21 虚拟机 189.6 对 216.2(0.88×);lab-13 虚拟机上 clang 单次 214–266 s 抖动很大。**不同虚拟机的绝对值差 1.5 倍,同一虚拟机内的比值稳定在 0.70–0.88** | Clang 比 GCC 快 12–30%;切换仍待全部测试在 Clang 上通过(3 个标准符合性缺陷已修,F16) |
 | F16 | Clang 发现的真实缺陷 | ① `VdfNode` 含 `std::vector<std::pair<std::string, VdfNode>>`(不完整类型,GCC 放过);② `color_profile.cpp` 的 `constexpr` 转换到枚举范围外的值;③ `tests/tools/ds5_native_usbip_smoke.cpp` 的 `int`→`uint8_t` 花括号窄化 | **已修** 三个独立提交 `04f488ba`、`e025bdc8`、`f62f4070`,各自可上游,与 CI 无关 |
 | F17 | 编译时间去向(Clang `-ftime-trace`,1011 个编译单元,无缓存,ClangBuildAnalyzer) | 前端解析 9012 s、后端代码生成 2842 s(**解析占 76%**);解析总耗时最高的头文件见 §6.2 | §6.2 |
 | F18 | 包数量、-O1/-O2 的单次冷构建 | -O1 4123 s、-O2 3932 s,比 -O3 的 3466 s 还慢 → 纯虚拟机噪声(±20%) | 单次结果不用于结论,交错重复见 lab-13 |
 
-(F1–F18 之外的详细实验记录见 §6、§7。)
+| F19 | **Asio/Beast 头文件版本混用导致随机崩溃** | `session_auth_routes_unit_tests` 在基线(master + #1254 的测试修复)上**单独运行 12/40 次崩溃(30%),四个并行 27/40 失败**;加上 Asio/Beast 分离编译后 **0/40、0/40**(lab-20;lab-18 的另一组 0/80)。`gdb` 栈(lab-19):`SIGSEGV` 在 `boost::asio::detail::win_iocp_io_context::timer_thread_function::operator()` → `_InterlockedExchange` | 推断:header-only 的 Asio 在同一可执行文件里被编译成了不同配置(例如 `sunshine_http` 带 `_WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN`,其它单元不带),出现 ODR 违规;分离编译让整个程序只有一份实现。**产品 `sunshine.exe` 链接同样的混合,可能是罕见现场崩溃的来源**(确切的差异宏尚未隔离)。**已实现** `5d5dcadd` |
+| F20 | Asio/Beast 分离编译的速度 | 同一虚拟机交错 3 次:gcc-base 249.6 s → 229.8 s(**−8%**) | 与 F19 同一提交 |
+| F21 | 编译标志(lab-13,10 个变体,同一虚拟机交错 3 次,取中位数) | gcc-base 255.2 s;`-pipe` 252.0(−1%);`--param ggc-min-*` 245.8(−4%);`-ftrack-macro-expansion=0` 249.9(−2%);`-O2` 234.9(−8%);`-O1` 194.1(−24%);组合(pipe+macro0+ggc+O2)226.0(−11%);clang `-O2`/`-O1` 211.3/197.5。该虚拟机本身抖动 ±20% | `-pipe`、ggc、macro 在噪声内,**否决**;Release 无 `-g`,`-g0`/`-fno-var-tracking` 不适用;降优化级别 PR 与发布不一致且热构建里编译只占一小部分,**否决** |
+| F22 | PCH(lab-21,同一虚拟机交错 3 次) | gcc-base 216.2 s;**gcc-pch-std**(标准库 + nlohmann + Boost.Log + property_tree,0 失败边)**193.5 s(−10.5%)**。含 Asio/Beast/SSL 的变体有 2 个编译单元(`video.cpp`、`display_vram.cpp`)与 PCH 冲突而失败,耗时不可比(Clang 122 s 与 GCC 166 s 都是缺项后的数字) | 冷构建 −10% 级别;热构建里编译占比小,且要处理 ccache 前提(`sloppiness=pch_defines,time_macros`)和个别单元的 `SKIP_PRECOMPILE_HEADERS`。**本轮不采用**,留作夜间冷构建的后续优化 |
+| F23 | Web UI 测试 | 154 个测试文件,逐个运行总计 193 s,其中 `sparxieCapturedGate.test.js` 一个文件 95 s(其余最慢 15 s)。该文件按测试分片(`SPARXIE_GATE_SHARD`)+ 其余文件 `node --test-shard`,4 个作业各跑一片 | Web UI 作业 **101 s → 38–50 s**(测试步骤 73 → 24 s)。**已实现** `1f66f143` |
+| F24 | 完整 PR 路径(fork 上,暖缓存,全部优化) | 墙钟 **6 分 15 秒**,全部作业绿,门禁绿;Windows 作业 356 s:检出 7 + 子模块 70 + 工具链 95 + configure 54 + **构建 92** + 测试 22 + 其它 | 对比原始 31–40 分钟 |
+| F25 | 其它实测 | ccache 命中成本:直接 66 ms、depend 66 ms、预处理 451 ms;进程创建 29 ms → 包装器/depend 模式无杠杆。Ninja 日志无尾部长任务 → 临界路径调度无收益。MSYS2 GCC 以 `--enable-bootstrap --enable-checking=release` 构建(无 LTO/PGO 引导)。官方 LLVM 23.1.5 安装包不存在(404) | 见 §6.3 |
+
+(F1–F25 之外的详细实验记录见 §6、§7。)
 ## 3 总体架构(已实现于 `.github/workflows/ci.yml`)
 
 一个入口工作流,触发器:`pull_request`、`merge_group`、`push`(master)、`workflow_dispatch`、`schedule`。开头的 `changes` 作业读改动文件并给后面的作业分流;最后一个 `ci-gate` 作业 `if: always()`,检查所有 `needs` 的结果,**它是唯一的必需检查**。不使用 `on.paths`:GitHub 文档说明工作流被路径过滤跳过时相关检查一直 Pending 会卡住合并,而被条件跳过的**作业**报告为成功;依赖失败的作业被跳过时需要 `always()` 才不会放行[S1]。`merge_group` 触发器必须有,否则合并队列拿不到必需检查[S1][S20]。
@@ -74,14 +82,14 @@ changes (ubuntu-slim, 5 s)
 
 | 场景 | 现状 | 流水线 | 关键路径(目标) |
 |---|---|---|---|
-| (a) PR,C++ 改动,热缓存 | ≈ 31–40 分钟 | `changes` + `webui`(Linux)‖ `win-build`;不打包;fork PR 无密钥,适配器关闭 | **≈ 8.5 分钟 + 未命中编译**:启动 0.1 + 检出 0.2 + 子模块 1.7(实测 99 s)+ 工具链 2.4(实测 143 s)+ configure 1.1(68 s)+ 构建 1.5(热缓存 85–92 s,F14)+ ctest 0.85(串行 51 s;`-j4` ⏳)+ 报告/上传 0.2。改动一个常用头文件时未命中增加:每个未命中单元约 5–40 CPU 秒 |
-| (a') PR,仅 Web UI | ≈ 31 分钟 | 只跑 `webui`(Linux)+ `ci-gate` | **≈ 2.5 分钟**:检出 0.1 + Node 0.1 + foundation-ui 0.1 + `npm ci` 0.05 + lint 0.05 + 测试 1.3(78 s,F7)+ 构建 ⏳ |
+| (a) PR,C++ 改动,热缓存 | ≈ 31–40 分钟 | `changes` + `webui`(Linux)‖ `win-build`;不打包;fork PR 无密钥,适配器关闭 | **实测 6 分 15 秒(fork,全部优化,暖缓存,全部作业绿)**:Windows 作业 356 s = 检出 7 + 子模块 70 + 工具链 95 + configure 54 + 构建 92 + ctest `-j4` 22 + 其它 16。改动一个常用头文件时未命中增加:每个未命中单元约 5–40 CPU 秒 |
+| (a') PR,仅 Web UI | ≈ 31 分钟 | 只跑 `webui`(Linux)+ `ci-gate` | **≈ 1 分钟**(实测,4 个并行分片各 38–50 s:检出 2 + Node 7 + foundation-ui 5 + `npm ci` 3 + lint 3 + 测试 24 + 构建 2,F23) |
 | (b) 功能分支 push | 与 PR 相同 | 无 PR 时只跑 `changes` + 轻量检查;C++ 构建由 PR、手动 `workflow_dispatch` 触发 | 轻量约 3 分钟;手动全量同 (a) |
-| (c) 合并队列 / push 到 master(预发布) | ≈ 40 分钟 + 打包(现在打包永远失败) | 方案 A(§8):队列里做候选构建(带密钥,适配器 ON,打包,来源证明);master `push` 只"晋升" | 队列:同 (a) + 打包 ⏳ ≈ 12–16 分钟;**master 晋升:2–3 分钟**(推算,§8.2);master 同时跑一次不阻塞的缓存刷新构建 |
+| (c) 合并队列 / push 到 master(预发布) | ≈ 40 分钟 + 打包(现在打包永远失败) | 方案 A(§8):队列里做候选构建(带密钥,适配器 ON,打包,来源证明);master `push` 只"晋升" | 队列:同 (a) + 打包(未测)≈ 8–12 分钟;**master 晋升:2–3 分钟**(推算,§8.2);master 同时跑一次不阻塞的缓存刷新构建 |
 | (d) 发布/稳定版 | 重新编译 + 签名 ≈ 35–45 分钟 | 下载同一提交的候选产物,验证来源证明,三次 SignPath 请求,重新打包(§9.3) | ≈ 8–12 分钟(SignPath 延迟未测) |
 | (e) 仅文档/图片/README/locale 文案 | ≈ 31–40 分钟 | `docs-check`(相对链接/图片)+ `ci-gate`;locale 文件改动时 `webui` 一并跑 | **≈ 1 分钟**(实测 `changes` 5 s;文档检查约 20 s;fork PR 上该作业已被正确地跳过) |
 | (f) 仅工作流/CI 脚本 | ≈ 31–40 分钟 | `workflow-lint`(actionlint + 对所有 `run` 块的 `bash -n` + 脚本单测)+ `ci-gate`;**`ci.yml`/脚本自身变化会触发完整流水线**(必须被真正执行一次) | 仅其它工作流文件:**≈ 1.5 分钟**(实测 7 s 级);ci.yml/脚本:同 (a) |
-| (g) 夜间(`schedule`)+ 手动 | 无 | 全量冷构建 GCC 与 Clang 两条腿(刷新默认分支 ccache)、完整 ctest、可选 Linux 可移植部分、依赖漂移金丝雀 | 冷构建 2050 s(GCC,共享对象)+ 工具链 4.5 分钟 + 测试 ≈ **40 分钟**,不影响任何人 |
+| (g) 夜间(`schedule`)+ 手动 | 无 | 全量冷构建 GCC 与 Clang 两条腿(刷新默认分支 ccache)、完整 ctest、可选 Linux 可移植部分、依赖漂移金丝雀 | 冷构建约 2050–2100 s(GCC,共享对象 + 分离编译,实测同一虚拟机 2094/2031 s)+ 工具链 4 分钟 + 测试 ≈ **40 分钟**,不影响任何人 |
 
 ## 5 逐步骤表(每一步都要更快)
 
@@ -96,13 +104,13 @@ changes (ubuntu-slim, 5 s)
 | 5 | MSYS2 + 依赖 | 27 + 85–93 | 约 100–145 | Defender 排除;显式包列表;`release: false` 用镜像自带 MSYS2[S9] | 实测整个 composite 143 s;pacman 65–117 s 的噪声 ±30%;**包数量缩减无收益**(F13) |
 | 6 | Node(Windows) | 10 | 0 | Web UI 移到 Linux | 实测 Linux 4–6 s |
 | 7 | foundation-ui | 20 | 3–6 | 固定提交 + 完整安装 | 实测 Linux 6 s |
-| 8 | Web UI(lint/测试/构建) | 99–111(Windows,关键路径) | 0(出关键路径) | Linux 并行作业[S14] | 实测:lint 3 s,测试 78 s(769 个全过),`npm ci` 3 s |
+| 8 | Web UI(lint/测试/构建) | 99–111(Windows,关键路径) | 0(出关键路径) | Linux 并行作业 + 4 分片(`node --test-shard`、按测试分片的 `SPARXIE_GATE_SHARD`)[S14] | **实测 101 s → 38–50 s**(测试 73 → 24 s);ESLint 缓存/vite 缓存无意义(lint 3 s、构建 2 s) |
 | 9 | 安装器 UI | 223 | 0–2 | Panel 发布固定资产 + sha256 + 来源证明(§9.2) | 实测:冷 236 s,cargo 缓存 186 s(仅省 50 s,否决缓存路线),下载校验 2 s |
 | 10 | 恢复编译缓存 | 5 | 5–20 | `actions/cache/restore`;只有 master/夜间保存 | 设计;保存的体积 0.2–0.5 GB |
 | 11 | Configure | 64–94 | 47–68 | 定向子模块;Defender 排除 | 实测 47–68 s;**Boost 源码缓存无意义**:108 MB 压缩包下载 1 s,整个 configure 仅 50 s(lab-8) |
-| 12 | **Build(热缓存)** | 1205–1500 | **85–92** | 共享对象库(F14)+ 命令行一致(F3/F4) | **实测 85–92 s**(GCC,全部目标文件删除) |
-| 12' | **Build(冷缓存)** | 3500(58 分钟) | 2050 | 共享对象库 | 实测 2050 s(−41%),Clang/PCH 等继续压缩见 §6 |
-| 13 | native tests | 56–120 | 20–50 | `ctest -j4`、`--no-tests=error`、JUnit→注解与摘要、允许跳过清单 | 串行实测 51 s;并行 ⏳ |
+| 12 | **Build(热缓存)** | 1205–1500 | **85–92** | 共享对象库(F14)+ 命令行一致(F3/F4)+ Asio/Beast 分离编译(F19/F20) | **实测 92 s**(PR 完整路径),85 s(lab) |
+| 12' | **Build(冷缓存)** | 3500(58 分钟) | 2050 | 共享对象库(−25%,同一虚拟机)+ 分离编译(−8%) | 实测 2031–2094 s;Clang(−12…−30%)待测试全绿后切换 |
+| 13 | native tests | 56–120 | 20–30 | `ctest -j4`、`--no-tests=error`、JUnit→注解与摘要、允许跳过清单 | **实测 22–28 s**(串行 51–57 s) |
 | 14 | 打包 + 装配 | ≈ 240(现在失败) | PR 不跑;候选/发布 60–150 | Inno `Compression` 档位、`LZMANumBlockThreads`[S15] | ⏳(lab-5 打包基准未跑到) |
 | 15 | 上传工件 | ? | 少 | `compression-level`、`retention-days`[S26] | 测试结果 7 天、压缩 6 |
 | 16 | 整体(PR 热缓存) | 1848 | **≈ 510(8.5 分钟)+ 未命中** | 并行 + 以上 | §4 |
@@ -151,14 +159,14 @@ changes (ubuntu-slim, 5 s)
 
 | # | 做法 | 来源 | 实测/预期 | 结论 |
 |---|---|---|---|---|
-| 1 | **一次编译多处使用(OBJECT 库)** | CMake `add_library(OBJECT)`、`$<TARGET_OBJECTS>`[S13] | 冷 −41%,热 −46%,86/86 测试通过(F14) | **采用,已实现** |
+| 1 | **一次编译多处使用(OBJECT 库)** | CMake `add_library(OBJECT)`、`$<TARGET_OBJECTS>`[S13] | 同一虚拟机冷 −25%,热 −46%,86/86 测试通过(F14) | **采用,已实现** |
 | 2 | 命令行一致(版本常量移出 `nvhttp.h`、适配器 `-D/-I` 按文件设置) | ccache 手册"The direct mode"[S12] | 一致 85 s 对不一致 567 s(F4) | **采用,已实现** |
-| 3 | 头文件瘦身(`logging.h` 去掉 sinks) | `-ftime-trace` | 估计 ≤ 5%(sinks.hpp 748 s / 前端 9012 s ≈ 8%,减去仍需的 `common.hpp`) | **采用,已实现** `b7fc88c9`,fork 构建验证中 |
-| 4 | 预编译头(PCH),GCC 与 Clang;Clang 加 `-fpch-instantiate-templates` | CMake `target_precompile_headers`[S13];ccache 手册:需 `sloppiness=pch_defines,time_macros`,GCC 加 `-fpch-preprocess`[S12] | ⏳ lab-14 `pch`(同一虚拟机交错 3 次);`-fpch-codegen/-fpch-debuginfo` 要求单独生成 PCH 对象,CMake 不管理,不在本轮 | ⏳ |
-| 5 | Asio/Beast 分离编译(`BOOST_ASIO_SEPARATE_COMPILATION`、`boost/asio/impl/src.hpp` 放进一个源文件)[S28] + 对最重的实例化用 `extern template` | Boost.Asio 文档 | ⏳ lab-14 `sep`;注意 `src/http/server.cpp` 的 GCC 编译 140 s,其中后端 93 s(Clang 追踪),分离编译主要减少前端 | ⏳ |
-| 6 | Clang(UCRT64,libstdc++)+ lld | MSYS2 环境页[S10];lld[S25] | 速度**未定**(0.69 对 1.05,F15);lld 无收益;**CLANG64(libc++)不可行**:预编译 `libx265.a` 引用 libstdc++ 符号;全部 86 测试在 Clang 上的结果待修复 3 个缺陷后复测 | ⏳ lab-14 `gccclang` |
-| 7 | 编译标志:`-pipe`、`--param ggc-min-*`、`-ftrack-macro-expansion=0`、-O1/-O2(仅 PR/测试构建) | GCC 手册 | ⏳ lab-13(10 个变体,同一虚拟机交错 3 次);当前无 `-g`(Release),所以 `-g0`/`-fno-var-tracking` 不适用 | ⏳ |
-| 8 | 更快的编译器二进制:官方 LLVM 发布版、llvm-mingw、WinLibs GCC | LLVM 文档(PGO/LTO 构建) | ⏳ lab-13 尝试官方 LLVM(`--gcc-install-dir` 指向 MSYS2);失败则记录原因 | ⏳ |
+| 3 | 头文件瘦身(`logging.h` 去掉 sinks) | `-ftime-trace` | 估计 ≤ 5%(sinks.hpp 748 s / 前端 9012 s ≈ 8%,减去仍需的 `common.hpp`);已通过 fork 完整构建与测试,单独的计时未做 | **采用,已实现** `b7fc88c9` |
+| 4 | 预编译头(PCH),GCC 与 Clang;Clang 加 `-fpch-instantiate-templates` | CMake `target_precompile_headers`[S13];ccache 手册:需 `sloppiness=pch_defines,time_macros`,GCC 加 `-fpch-preprocess`[S12] | **gcc-pch-std(标准库 + nlohmann + Boost.Log + property_tree):216.2 → 193.5 s(−10.5%)**,0 失败边;含 Asio/Beast 的版本有 2 个单元(`video.cpp`、`display_vram.cpp`)冲突失败,耗时不可比;Clang `-fpch-instantiate-templates` 与不带该标志相同(122.2 对 121.7 s,同样缺项);`-fpch-codegen/-fpch-debuginfo` 要求单独生成 PCH 对象,CMake 不管理 | **暂不采用**:冷构建 −10%,热构建里编译只占一小部分;采用需要 ccache 的 sloppiness 设置和 2 个单元的 `SKIP_PRECOMPILE_HEADERS` |
+| 5 | Asio/Beast 分离编译(`BOOST_ASIO_SEPARATE_COMPILATION`、`boost/asio/impl/src.hpp` 放进一个源文件)[S28] | Boost.Asio 文档 | **249.6 → 229.8 s(−8%,同一虚拟机交错 3 次)**;**并消除了随机崩溃(F19:12/40 → 0/40)**;`extern template` 对最重的实例化(`src/http/server.cpp` 编译 107–140 s,后端占大头)未做,留作后续 | **采用,已实现** `5d5dcadd` + `bcrypt`/`crypt32` 链接修复 |
+| 6 | Clang(UCRT64,libstdc++)+ lld | MSYS2 环境页[S10];lld[S25] | **同一虚拟机交错 3 次:0.705×(−29.5%)**,其它虚拟机 0.74×、0.88×;lld 无收益;**CLANG64(libc++)不可行**:预编译 `libx265.a` 引用 libstdc++ 符号;3 个缺陷已修,全部 86 测试在 Clang 上的结果待复测 | **待切换**:速度条件满足,测试条件待复测;保留 GCC 腿(夜间/手动) |
+| 7 | 编译标志:`-pipe`、`--param ggc-min-*`、`-ftrack-macro-expansion=0`、-O1/-O2(仅 PR/测试构建) | GCC 手册 | lab-13(10 个变体,同一虚拟机交错 3 次,中位数):-pipe −1%、ggc −4%、macro −2%(均在噪声内)、-O2 −8%、-O1 −24%、组合 −11%;当前无 `-g`(Release),`-g0`/`-fno-var-tracking` 不适用 | **否决**:前三项噪声内;降优化级别使 PR 测试跑的不是发布配置,且热构建里编译只占一小部分 |
+| 8 | 更快的编译器二进制:官方 LLVM 发布版、llvm-mingw、WinLibs GCC | LLVM 文档(PGO/LTO 构建) | 官方 LLVM 23.1.5 安装包不存在(404);MSYS2 GCC 以 `--enable-bootstrap --enable-checking=release` 构建,无 LTO/PGO 引导;WinLibs 有同版本 GCC 16.2.0 UCRT 构建(r3);对比实验(lab-23)多次因我的脚本错误未跑出结果 | ⏳ 未得出结论 |
 | 9 | 进程创建开销 | 实测 | `g++ --version` 29 ms,ccache 命中 66 ms,depend 模式 66 ms = 直接模式,预处理模式 451 ms | **否决**(无杠杆) |
 | 10 | 预构建第三方(Boost 作为已安装包,按版本 + 工具链哈希缓存) | CMake `FetchContent`[S13] | Boost 编译 758 CPU 秒(冷构建的 5.5%),PyroWave/Granite 另 155;热构建里它们本来就是缓存命中 | **否决**(只对夜间冷构建有 5% 收益,换来额外的缓存键与安装步骤) |
 | 11 | Ninja ≥ 1.12 临界路径调度 | Ninja 手册(未记载此功能) | MSYS2 的 ninja 是 1.13.2;日志显示最长的编译在构建开始处(2%–55%)启动,最后 15% 时间里仅 0–23 s 低于 4 路并行 | **否决**(无尾部问题) |
@@ -175,12 +183,12 @@ changes (ubuntu-slim, 5 s)
 
 | # | 并行化 | 离开关键路径的时间 | 重复成本 | 依据/状态 |
 |---|---|---|---|---|
-| 1 | Web UI(lint+测试+i18n+vite build)作为独立 Linux 作业 | 99–111 s | 无 | **已实现**。实测整个作业约 2–3 分钟,在 Windows 构建期间早已跑完,失败更早 |
+| 1 | Web UI(lint+测试+i18n+vite build)作为独立 Linux 作业,分 4 片 | 99–111 s | 4 个 Linux 作业(与 Windows 构建并行) | **已实现**。单作业 101 s → 分片后 38–50 s,在 Windows 构建期间早已跑完,失败更早 |
 | 2 | 安装器 UI 与固定资产 | 223 s 或固定资产 2 s | 若从子模块构建:一个 Windows 作业 | §9.2;等 #1254 合并后接入 |
 | 3 | C++ 拆成"产品+打包"与"测试"两个并行 Windows 作业 | 无净收益 | 4–5 分钟 | 共享对象库后测试半边仍要主机对象(§6.3 第 13 项)→ **不拆** |
 | 4 | `vdd_smoke`、`mat_smoke` | 已并行 | — | 保持,按路径条件运行 |
 | 5 | `setup_release` | 已并行(19 s) | — | 只在会发布的场景运行 |
-| 6 | ctest 并行 | 51 s → ⏳ | — | `-j4` |
+| 6 | ctest 并行 | 51–57 s → 22–28 s | — | **已实现** `-j4`,fork 上稳定 |
 | 7 | 缓存修剪 | 出关键路径 | — | **已实现**(独立 ubuntu-slim 作业) |
 | 8 | 打包与 ZIP 并行 | ⏳ | 内存(`lzma2/ultra64` 编译字典约 742 MB[S15]) | 待测 |
 
@@ -188,8 +196,8 @@ changes (ubuntu-slim, 5 s)
 
 | 场景 | 链 | 合计 |
 |---|---|---|
-| (a) PR,C++,热缓存 | 启动 0.1 → 检出 0.2 → 子模块 1.7 → 工具链 2.4 → configure 1.1 → 构建 1.5(+未命中)→ ctest 0.85 → 上传 0.2 | **≈ 8–9**(+ 未命中) |
-| (a') Web UI | `changes` 0.2 → Linux `webui` 2.3 | ≈ 2.5 |
+| (a) PR,C++,热缓存 | 启动 0.1 → 检出 0.1 → 子模块 1.2 → 工具链 1.6 → configure 0.9 → 构建 1.5(+未命中)→ ctest 0.4 → 上传 0.2 | **实测 6.0(Windows 作业 356 s),整次运行 6 分 15 秒**(+ 未命中) |
+| (a') Web UI | `changes` 0.2 → Linux `webui` 分片 0.8 | ≈ 1(实测 38–50 s) |
 | (c) master 晋升 | 启动 0.2 + 查找 + 下载 0.6 + 校验 0.3 + 发布 1 | 2–3(推算) |
 | (d) 稳定版 | 下载+校验 1 + 三次 SignPath 各 1–3 + 打包与校验 2 | 8–12 |
 | (e) 文档 | `changes` 0.2 + 链接检查 0.4 + gate 0.2 | ≈ 1 |
