@@ -47,16 +47,19 @@ jobs:
           npm ci --omit=dev --omit=peer --prefix "$GITHUB_WORKSPACE/../ds5-ui-m3e" --no-audit --no-fund
           echo "foundation-ui: $(( $(date +%s) - s )) s"
       - name: npm ci
-        run: s=$(date +%s); npm ci --no-audit --no-fund; echo "npm ci: $(( $(date +%s) - s )) s"
+        run: |
+          s=$(date +%s); npm ci --no-audit --no-fund; echo "npm ci: $(( $(date +%s) - s )) s"
       - name: lint
-        run: s=$(date +%s); npm run lint:webui; echo "lint: $(( $(date +%s) - s )) s"
+        run: |
+          s=$(date +%s); npm run lint:webui; echo "lint: $(( $(date +%s) - s )) s"
       - name: tests (junit + spec)
         run: |
           s=$(date +%s)
           node --import foundation-ui/testing/no-network --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=webui-junit.xml "src_assets/common/assets/web/tests/*.test.js" | tail -12
           echo "tests: $(( $(date +%s) - s )) s"
       - name: i18n validate
-        run: s=$(date +%s); npm run i18n:validate | tail -3; echo "i18n: $(( $(date +%s) - s )) s"
+        run: |
+          s=$(date +%s); npm run i18n:validate | tail -3; echo "i18n: $(( $(date +%s) - s )) s"
       - name: build
         run: |
           s=$(date +%s); mkdir -p build
