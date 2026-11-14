@@ -1,0 +1,154 @@
+name: ci-lab3
+# Fork-only measurement lab 3: GCC vs clang (UCRT64, libstdc++) full builds, warm-cache behaviour, flag-mismatch cost.
+on:
+  push:
+    branches: ["ci/lab3-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  toolchain:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc, pkgs: "", cmake: "", flagmismatch: "yes" }
+          - { name: clang-gnuld, pkgs: "mingw-w64-ucrt-x86_64-clang", cmake: "-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++", flagmismatch: "no" }
+          - { name: clang-lld, pkgs: "mingw-w64-ucrt-x86_64-clang", cmake: "-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld", flagmismatch: "no" }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1plus.exe','cc1.exe','as.exe','ld.exe','ld.lld.exe','clang.exe','clang++.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget curl
+      - name: Update Windows dependencies
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          dependencies=(git mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cppwinrt mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-graphviz mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-onevpl mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-autotools ${{ matrix.pkgs }})
+          pacman -Syu --noconfirm "${dependencies[@]}"
+          pacman --noconfirm -U ${opus_tarball}
+          if [ "${{ matrix.name }}" != gcc ]; then clang++ --version; fi
+          g++ --version | head -1
+      - name: Configure (commit A)
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab3
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab3
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s); mkdir -p build; ccache --zero-stats
+          cmake -B build -G Ninja -S . ${{ matrix.cmake }} -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          echo "configure wall: $(( $(date +%s) - start )) s"
+      - name: Cold build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          start=$(date +%s)
+          ninja -C build -k 0 2>&1 | tee build-cold.log | grep -E "^FAILED|error:|ninja: build stopped" | head -60 || true
+          echo "cold build wall: $(( $(date +%s) - start )) s"
+          echo "warnings: $(grep -c 'warning:' build-cold.log || true)  errors: $(grep -c 'error:' build-cold.log || true)"
+          grep 'warning:' build-cold.log | sed -E 's/.*\[(-W[a-z0-9=-]+)\].*/\1/' | sort | uniq -c | sort -rn | head -15
+          ccache --show-stats --verbose
+          cp build/.ninja_log ninja_log_cold.txt
+          ls -l build/sunshine.exe build/tests/test_sunshine.exe 2>&1
+          du -sh build | tail -1
+      - name: Tests
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          ctest --test-dir build --output-on-failure --output-junit "$GITHUB_WORKSPACE/ctest.xml" 2>&1 | tee ctest.log | tail -15
+          echo "ctest wall: $(( $(date +%s) - start )) s"
+      - name: Warm pass A (next commit, all objects gone, same flags)
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+          BRANCH: ci-lab3
+          BUILD_VERSION: lab.zayu
+          COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_BRANCH: ci-lab3
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ccache --zero-stats
+          cmake -B build >/dev/null
+          find build -name '*.obj' -delete
+          export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache-a.log"
+          start=$(date +%s); ninja -C build -k 0 > build-warm-a.log 2>&1 || true; echo "warm A wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats --verbose
+          echo "direct: $(grep -c 'Result: direct_cache_hit' ccache-a.log || true)  preprocessed: $(grep -c 'Result: preprocessed_cache_hit' ccache-a.log || true)  miss: $(grep -c 'Result: cache_miss' ccache-a.log || true)"
+          cp build/.ninja_log ninja_log_warm_a.txt
+          unset CCACHE_LOGFILE
+      - name: Warm pass B (every translation unit gets a different -D, as when master was built with other options)
+        if: matrix.flagmismatch == 'yes'
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+          BRANCH: ci-lab3
+          BUILD_VERSION: lab.zayu
+          COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_BRANCH: ci-lab3
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # first remember the options as a "master-like" cache entry by building once with -DLAB_FLAG_X=1 ...
+          ccache --zero-stats
+          cmake -B build -DCMAKE_C_FLAGS=-DLAB_FLAG_X=1 -DCMAKE_CXX_FLAGS=-DLAB_FLAG_X=1 >/dev/null
+          start=$(date +%s); ninja -C build -k 0 > build-b1.log 2>&1 || true; echo "B1 (cold for the new option set) wall: $(( $(date +%s) - start )) s"
+          # ... then flip the option, which is the situation of a fork PR that restores such a cache
+          cmake -B build -DCMAKE_C_FLAGS=-DLAB_FLAG_X=2 -DCMAKE_CXX_FLAGS=-DLAB_FLAG_X=2 >/dev/null
+          find build -name '*.obj' -delete
+          ccache --zero-stats
+          export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache-b.log"
+          start=$(date +%s); ninja -C build -k 0 > build-b2.log 2>&1 || true; echo "B2 (options differ from cached, preprocessor path) wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats --verbose
+          echo "direct: $(grep -c 'Result: direct_cache_hit' ccache-b.log || true)  preprocessed: $(grep -c 'Result: preprocessed_cache_hit' ccache-b.log || true)  miss: $(grep -c 'Result: cache_miss' ccache-b.log || true)"
+          cp build/.ninja_log ninja_log_warm_b.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lab3-${{ matrix.name }}
+          path: |
+            ninja_log_*.txt
+            ctest.xml
+            ctest.log
+            build-cold.log
