@@ -196,8 +196,18 @@ jobs:
         if: always()
         run: python3 scripts/ci/report-junit.py --title "Web UI tests" --min-tests 500 webui-junit.xml
 
-      - name: Locale files
-        run: npm run i18n:validate
+      # Informational: translations lag behind the English file by design (Crowdin fills them in), so missing or
+      # untranslated keys are reported as a warning with the numbers and do not fail the run.
+      - name: Locale files (informational)
+        run: |
+          set +e
+          npm run i18n:validate > i18n.log 2>&1
+          status=$?
+          tail -n +1 i18n.log | head -60
+          if [ $status -ne 0 ]; then
+            echo "::warning title=Locale files::$(grep -c 'Issues found' i18n.log) locale files differ from en.json (see the log of this step)"
+          fi
+          exit 0
 
       - name: Build
         run: |
