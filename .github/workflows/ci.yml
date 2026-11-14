@@ -325,7 +325,9 @@ jobs:
         run: python3 scripts/ci/report-junit.py --title "Native tests (${{ matrix.toolchain }})" --min-tests 80 --allowed-skips scripts/ci/allowed-skips.txt ctest.xml
 
       - name: Save compiler cache
-        if: ${{ !cancelled() && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        # Forks that run this workflow on their own have no default-branch lineage to restore from, so there the pull request
+        # runs save too (the next push of the same pull request restores it).
+        if: ${{ !cancelled() && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.repository != 'AlkaidLab/foundation-sunshine') }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
