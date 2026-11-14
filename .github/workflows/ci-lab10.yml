@@ -57,4 +57,7 @@ jobs:
           echo "### test_sunshine: src/config.cpp"; show 'test_sunshine\.dir/__/src/config\.cpp\.obj' > b.txt; wc -l b.txt
           echo "### diff sunshine vs test_sunshine (< only sunshine, > only test_sunshine)"; comm -3 a.txt b.txt || true
           echo "### abr_unit_tests: src/streaming/abr.cpp vs sunshine"; show 'sunshine\.dir/src/streaming/abr\.cpp\.obj' > c.txt; show 'abr_unit_tests\.dir/__/src/streaming/abr\.cpp\.obj' > d.txt; comm -3 c.txt d.txt || true
+          echo "### commands that carry the adapter definition: $(grep -c 'SUNSHINE_DLSSNR_ADAPTER' commands.txt) of $(grep -c ' -c ' commands.txt)"
+          grep 'SUNSHINE_DLSSNR_ADAPTER' commands.txt | grep -oE '[^ ]+\.cpp\.obj' | sort -u | head -6
+          echo "### object library: $(grep -c 'sunshine_host_objects.dir' commands.txt) compile commands; test_sunshine compiles host sources itself: $(grep -c 'test_sunshine.dir/__/src' commands.txt); sunshine itself: $(grep -c ' CMakeFiles/sunshine.dir/src' commands.txt)"
           echo "### one full sunshine command"; grep -E 'sunshine\.dir/src/config\.cpp\.obj' commands.txt | head -1 | cut -c1-2500
