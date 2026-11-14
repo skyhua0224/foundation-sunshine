@@ -19,9 +19,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $panel 'installer-ui/Cargo.toml'))) 
 # Without the pages root the build silently falls back to a placeholder page: refuse that.
 if (-not (Test-Path -LiteralPath (Join-Path $ui 'src/vue/installer/MInstaller.vue'))) { throw "foundation-ui at $ui has no installer pages (src/vue/installer/MInstaller.vue)" }
 New-Item -ItemType Directory -Path $work | Out-Null
+$PSNativeCommandUseErrorActionPreference = $false
 robocopy $panel $work /E /XD .git node_modules target dist-installer /XF .git /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 $global:LASTEXITCODE = 0
+$PSNativeCommandUseErrorActionPreference = $true
 
 Push-Location $work
 try {
