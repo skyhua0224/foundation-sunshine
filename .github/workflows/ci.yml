@@ -198,9 +198,10 @@ jobs:
           set -uo pipefail
           dir=src_assets/common/assets/web/tests
           gate=sparxieCapturedGate.test.js
-          files=$(ls $dir/*.test.js | grep -v "/$gate$")
+          files=()
+          for f in "$dir"/*.test.js; do [ "${f##*/}" = "$gate" ] || files+=("$f"); done
           common=(--import foundation-ui/testing/no-network --test --test-reporter=spec --test-reporter-destination=stdout)
-          node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-files.xml --test-shard="$SHARD/4" $files &
+          node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-files.xml --test-shard="$SHARD/4" "${files[@]}" &
           others=$!
           SPARXIE_GATE_SHARD="$SHARD/4" node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-gate.xml "$dir/$gate" &
           gate_pid=$!
