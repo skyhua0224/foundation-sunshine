@@ -84,7 +84,7 @@ jobs:
             mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-autotools)
           pacman -Syu --noconfirm "${dependencies[@]}"
           pacman --noconfirm -U ${opus_tarball}
-          pacman -Q | grep -E "mingw-w64-ucrt-x86_64-(gcc|cmake|ninja|ccache|lld|binutils|openssl|curl-winssl)-[0-9]" | tee "$GITHUB_WORKSPACE/toolchain-versions.txt"
+          pacman -Q | grep -E "mingw-w64-ucrt-x86_64-(gcc|cmake|ninja|ccache|lld|binutils|openssl|curl-winssl) " | tee "$GITHUB_WORKSPACE/toolchain-versions.txt" || true
       - name: Configure
         shell: msys2 {0}
         env:
