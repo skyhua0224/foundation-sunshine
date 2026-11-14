@@ -1,0 +1,66 @@
+name: ci-lab15
+# Fork-only: is the shared host-object library really faster? Same VM, cold builds without a compiler cache, order ON, OFF, ON.
+on:
+  push:
+    branches: ["ci/lab15-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  objlib:
+    runs-on: windows-latest
+    timeout-minutes: 178
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+      - name: Configure both layouts
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab15
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab15
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          common=(-G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF)
+          cmake -B build-on  "${common[@]}" -DSUNSHINE_SHARE_HOST_OBJECTS=ON  > configure-on.log 2>&1 || { tail -20 configure-on.log; exit 1; }
+          cmake -B build-off "${common[@]}" -DSUNSHINE_SHARE_HOST_OBJECTS=OFF > configure-off.log 2>&1 || { tail -20 configure-off.log; exit 1; }
+          for d in on off; do echo "edges $d: $(ninja -C build-$d -n | tail -1)"; done
+      - name: Cold builds ON, OFF, ON
+        shell: msys2 {0}
+        run: |
+          set +e
+          for step in on off on2; do
+            d=${step%2}
+            if [ "$step" = on2 ]; then rm -rf build-on2; cp -r build-on build-on2.tmp 2>/dev/null; rm -rf build-on2.tmp; fi
+            start=$(date +%s)
+            if [ "$step" = on2 ]; then
+              # a third build of the first layout from a clean configure in a fresh directory
+              cmake -B build-on2 -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF -DSUNSHINE_SHARE_HOST_OBJECTS=ON > /dev/null 2>&1
+              start=$(date +%s)
+              ninja -C build-on2 -k 0 > build-$step.log 2>&1
+            else
+              ninja -C build-$d -k 0 > build-$step.log 2>&1
+            fi
+            echo "RESULT cold build $step: $(( $(date +%s) - start )) s, failed edges: $(grep -c '^FAILED' build-$step.log), compile edges: $(grep -c ' Building ' build-$step.log)" | tee -a results.txt
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lab15
+          path: |
+            results.txt
+            build-*.log
+          compression-level: 6
