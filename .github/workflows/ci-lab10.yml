@@ -55,6 +55,6 @@ jobs:
           show() { grep -E "$1" commands.txt | head -1 | norm | tr ' ' '\n' | grep -E '^-[DIWOgfmsW]|^-std|^--' | sort -u; }
           echo "### sunshine: src/config.cpp"; show 'sunshine\.dir/src/config\.cpp\.obj' > a.txt; wc -l a.txt
           echo "### test_sunshine: src/config.cpp"; show 'test_sunshine\.dir/__/src/config\.cpp\.obj' > b.txt; wc -l b.txt
-          echo "### diff sunshine vs test_sunshine (< only sunshine, > only test_sunshine)"; diff a.txt b.txt || true
-          echo "### abr_unit_tests: src/streaming/abr.cpp vs sunshine"; show 'sunshine\.dir/src/streaming/abr\.cpp\.obj' > c.txt; show 'abr_unit_tests\.dir/__/src/streaming/abr\.cpp\.obj' > d.txt; diff c.txt d.txt || true
+          echo "### diff sunshine vs test_sunshine (< only sunshine, > only test_sunshine)"; comm -3 a.txt b.txt || true
+          echo "### abr_unit_tests: src/streaming/abr.cpp vs sunshine"; show 'sunshine\.dir/src/streaming/abr\.cpp\.obj' > c.txt; show 'abr_unit_tests\.dir/__/src/streaming/abr\.cpp\.obj' > d.txt; comm -3 c.txt d.txt || true
           echo "### one full sunshine command"; grep -E 'sunshine\.dir/src/config\.cpp\.obj' commands.txt | head -1 | cut -c1-2500
