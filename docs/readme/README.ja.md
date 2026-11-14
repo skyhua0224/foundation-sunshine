@@ -1,13 +1,13 @@
-# Foundation Sunshine
-
 [简体中文](../../README.md) · [English](README.en.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · 日本語
 
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/hero-dark.png">
-  <img src="../../assets/readme/hero.png" width="800" alt="Foundation Sunshine — 仮想ディスプレイ対応の Windows 向け HDR ゲームストリーミング ホスト（Moonlight 向け Sunshine フォーク）">
-</picture>
+<p><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/hero-dark.en.png">
+  <img src="../../assets/readme/hero.en.png" width="800" alt="Foundation Sunshine — 仮想ディスプレイ対応の Windows 向け HDR ゲームストリーミング ホスト（Moonlight 向け Sunshine フォーク）">
+</picture></p>
+
+<p align="center"><a href="https://github.com/AlkaidLab/foundation-sunshine/releases/latest"><picture>  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/b1-dark.ja.webp">  <img src="../../assets/readme/b1.ja.webp" alt="ホストを入手" height="56"></picture></a>&nbsp;&nbsp;<a href="#クライアントmoonlight"><picture>  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/b2-dark.ja.webp">  <img src="../../assets/readme/b2.ja.webp" alt="クライアントを入手" height="56"></picture></a>&nbsp;&nbsp;<a href="#クイック-スタート"><picture>  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/b3-dark.ja.webp">  <img src="../../assets/readme/b3.ja.webp" alt="インストールと初回接続" height="56"></picture></a></p>
 
 [![Build](https://img.shields.io/github/actions/workflow/status/AlkaidLab/foundation-sunshine/main.yml?branch=master&label=Build)](https://github.com/AlkaidLab/foundation-sunshine/actions/workflows/main.yml) [![Latest release](https://img.shields.io/github/v/release/AlkaidLab/foundation-sunshine?include_prereleases&sort=date&label=Latest)](https://github.com/AlkaidLab/foundation-sunshine/releases) [![Downloads](https://img.shields.io/github/downloads/AlkaidLab/foundation-sunshine/total?label=Downloads)](https://github.com/AlkaidLab/foundation-sunshine/releases) [![GitHub Stars](https://img.shields.io/github/stars/AlkaidLab/foundation-sunshine?style=flat&label=Stars)](https://github.com/AlkaidLab/foundation-sunshine) [![License](https://img.shields.io/badge/License-GPL--3.0-blue)](https://github.com/AlkaidLab/foundation-sunshine/blob/master/LICENSE)
 
@@ -19,7 +19,14 @@ Foundation Sunshine は、Sunshine をベースにした Windows 向けの無料
 
 動的 HDR と画面キャリブレーションから低遅延キャプチャ、ハードウェア エンコードまで、Foundation は映像と入力をできるだけローカルに近づけます。サラウンドとマイク転送、DualSense のネイティブ フィードバック、クリップボード、共有フォルダーがセッションと並行して利用でき、専用のデスクトップ GUI が設定、デバイス コンポーネント、ゲーム ライブラリを一か所にまとめます。
 
-**[ホスト（Sunshine）をダウンロード](https://github.com/AlkaidLab/foundation-sunshine/releases/latest)** · **[クライアント（Moonlight）をダウンロード](#クライアントmoonlight)** · **[インストールと初回接続](#クイック-スタート)**
+<div align="center">
+
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../assets/readme/show-dark.en.webp">
+  <img src="../../assets/readme/show.en.webp" alt="Foundation Sunshine の紹介画像：セリフ体の大見出し、傾けたコントロールパネルとスマートフォン、HDR・フレームレート・ホスト遅延・DualSense 触覚ゲイン・スマートフォン管理のウィジェット（すべて白いステッカー縁取り付き）。" width="952">
+</picture></p>
+
+</div>
 
 [特長](#特長) · [ドキュメント（英語）](../en/README.md) · [FAQ（英語）](../en/faq.md) · [開発（英語）](../en/development.md) · [コントリビュート](../contributing.en.md)
 - [アップグレード（英語）](../en/upgrading.md)：正式版とテスト版、構成の保存、更新の確認。

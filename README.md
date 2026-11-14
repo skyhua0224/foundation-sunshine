@@ -1,11 +1,11 @@
-# Foundation Sunshine
-
 <div align="center">
 
-<picture>
+<p><picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.png">
   <img src="assets/readme/hero.png" width="800" alt="Foundation Sunshine：让游戏串流更优雅。低延迟、HDR、虚拟显示器。">
-</picture>
+</picture></p>
+
+<p align="center"><a href="https://github.com/AlkaidLab/foundation-sunshine/releases/latest"><picture>  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/b1-dark.webp">  <img src="assets/readme/b1.webp" alt="下载被控端" height="56"></picture></a>&nbsp;&nbsp;<a href="#控制端moonlight"><picture>  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/b2-dark.webp">  <img src="assets/readme/b2.webp" alt="下载控制端" height="56"></picture></a>&nbsp;&nbsp;<a href="#快速开始"><picture>  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/b3-dark.webp">  <img src="assets/readme/b3.webp" alt="安装与首次连接" height="56"></picture></a></p>
 
 [![Build](https://img.shields.io/github/actions/workflow/status/AlkaidLab/foundation-sunshine/main.yml?branch=master&label=Build)](https://github.com/AlkaidLab/foundation-sunshine/actions/workflows/main.yml) [![Latest release](https://img.shields.io/github/v/release/AlkaidLab/foundation-sunshine?include_prereleases&sort=date&label=Latest)](https://github.com/AlkaidLab/foundation-sunshine/releases) [![Downloads](https://img.shields.io/github/downloads/AlkaidLab/foundation-sunshine/total?label=Downloads)](https://github.com/AlkaidLab/foundation-sunshine/releases) [![GitHub Stars](https://img.shields.io/github/stars/AlkaidLab/foundation-sunshine?style=flat&label=Stars)](https://github.com/AlkaidLab/foundation-sunshine) [![License](https://img.shields.io/badge/License-GPL--3.0-blue)](https://github.com/AlkaidLab/foundation-sunshine/blob/master/LICENSE)
 
@@ -19,7 +19,14 @@ Foundation Sunshine 是基于 [Sunshine](https://github.com/LizardByte/Sunshine)
 
 从动态 HDR、屏幕校准到低延迟捕获与硬件编码，Foundation 让远程画面和操作更贴近本地体验。环绕声与麦克风透传、DualSense 原生反馈、剪贴板和文件共享也能随连接使用；独立桌面 GUI 提供更优质的用户体验，将这些原本繁琐的设置、设备组件和游戏库集中管理。
 
-**[下载被控端（Sunshine）](https://github.com/AlkaidLab/foundation-sunshine/releases/latest)** · **[下载控制端（Moonlight）](#控制端moonlight)** · **[安装与首次连接](#快速开始)**
+<div align="center">
+
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/show-dark.webp">
+  <img src="assets/readme/show.webp" alt="Foundation Sunshine 展示图：衬线大标题，倾斜的控制面板和手机以及 HDR、帧率、主机延迟、DualSense 触觉增益、手机管理小组件，全部带白色贴纸描边。" width="952">
+</picture></p>
+
+</div>
 
 [项目亮点](#项目亮点) · [功能与设置](docs/zh-CN/features.md) · [FAQ](docs/zh-CN/faq.md) · [开发文档](docs/zh-CN/development.md) · [贡献指南](docs/contributing.md)
 
@@ -155,9 +162,15 @@ Foundation Sunshine 是基于 [Sunshine](https://github.com/LizardByte/Sunshine)
 
 ## 基地开发团队成员
 
-| [![qiin2333](https://avatars.githubusercontent.com/u/2795904?s=80)](https://github.com/qiin2333) | [![Yundi339](https://avatars.githubusercontent.com/u/38252824?s=80)](https://github.com/Yundi339) | [![ShadowLemoon](https://avatars.githubusercontent.com/u/119576779?s=80)](https://github.com/ShadowLemoon) | [![skyhua0224](https://avatars.githubusercontent.com/u/91328606?s=80)](https://github.com/skyhua0224) |
+| [![qiin2333](https://avatars.githubusercontent.com/u/2795904?s=80)](https://github.com/qiin2333) | [![Yundi339](https://avatars.githubusercontent.com/u/38252824?s=80)](https://github.com/Yundi339) | [![skyhua0224](https://avatars.githubusercontent.com/u/91328606?s=80)](https://github.com/skyhua0224) | [![ShadowLemoon](https://avatars.githubusercontent.com/u/119576779?s=80)](https://github.com/ShadowLemoon) |
 | :---: | :---: | :---: | :---: |
-| [qiin2333](https://github.com/qiin2333) | [Yundi339](https://github.com/Yundi339) | [ShadowLemoon](https://github.com/ShadowLemoon) | [skyhua0224](https://github.com/skyhua0224) |
+| [qiin2333](https://github.com/qiin2333)<br>创始人 | [Yundi339](https://github.com/Yundi339) | [skyhua0224](https://github.com/skyhua0224) | [ShadowLemoon](https://github.com/ShadowLemoon) |
+
+## 赞助
+
+赞助完全自愿，Foundation Sunshine 始终免费开源，不赞助也能用上全部功能。
+
+爱发电：[qiin2333](https://www.ifdian.net/a/qiin2333) · [Yundi339](https://www.ifdian.net/a/Yundi339) · [skyhua0224](https://ifdian.net/a/skyhua)
 
 ## 其他贡献者
 
