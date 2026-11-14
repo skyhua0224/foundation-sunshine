@@ -3,14 +3,9 @@ name: Build and Release
 # Published releases are owned by sign-and-repackage.yml. Keeping that event
 # out of this workflow prevents a release created below from starting another
 # build-and-release cycle.
+# Pull requests are validated by ci.yml (routing, Web UI, Windows build and tests). This workflow keeps the master and
+# manual builds that package and publish until the merge-queue promotion replaces them.
 on:
-  pull_request:
-    branches:
-      - master
-    types:
-      - opened
-      - synchronize
-      - reopened
   push:
     branches:
       - master
