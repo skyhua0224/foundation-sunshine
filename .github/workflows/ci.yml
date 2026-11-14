@@ -146,11 +146,15 @@ jobs:
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
 
   webui:
-    name: Web UI
+    name: Web UI (shard ${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.webui == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     permissions:
       contents: read
     steps:
@@ -180,36 +184,51 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # Lint, locale check and build are a few seconds; they run once, in shard 1.
       - name: Lint
+        if: matrix.shard == 1
         run: npm run lint:webui
 
+      # One test file (sparxieCapturedGate) takes as long as all the others together, so it is sharded by test
+      # (SPARXIE_GATE_SHARD) and the other files by file (node --test-shard); both processes run side by side.
       - name: Tests
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          set -o pipefail
-          node --import foundation-ui/testing/no-network --test \
-            --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=junit --test-reporter-destination=webui-junit.xml \
-            "src_assets/common/assets/web/tests/*.test.js"
-        # the report step below turns a missing or empty result into a failure as well
+          set -uo pipefail
+          dir=src_assets/common/assets/web/tests
+          gate=sparxieCapturedGate.test.js
+          files=$(ls $dir/*.test.js | grep -v "/$gate$")
+          common=(--import foundation-ui/testing/no-network --test --test-reporter=spec --test-reporter-destination=stdout)
+          node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-files.xml --test-shard="$SHARD/4" $files &
+          others=$!
+          SPARXIE_GATE_SHARD="$SHARD/4" node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-gate.xml "$dir/$gate" &
+          gate_pid=$!
+          status=0
+          wait "$others" || status=1
+          wait "$gate_pid" || status=1
+          exit $status
 
       - name: Report
         if: always()
-        run: python3 scripts/ci/report-junit.py --title "Web UI tests" --min-tests 500 webui-junit.xml
+        run: python3 scripts/ci/report-junit.py --title "Web UI tests (shard ${{ matrix.shard }}/4)" --min-tests 40 webui-junit-files.xml webui-junit-gate.xml
 
       # Informational: translations lag behind the English file by design (Crowdin fills them in), so missing or
       # untranslated keys are reported as a warning with the numbers and do not fail the run.
       - name: Locale files (informational)
+        if: matrix.shard == 1
         run: |
           set +e
           npm run i18n:validate > i18n.log 2>&1
           status=$?
-          tail -n +1 i18n.log | head -60
+          head -60 i18n.log
           if [ $status -ne 0 ]; then
             echo "::warning title=Locale files::$(grep -c 'Issues found' i18n.log) locale files differ from en.json (see the log of this step)"
           fi
           exit 0
 
       - name: Build
+        if: matrix.shard == 1
         run: |
           mkdir -p build
           SUNSHINE_SOURCE_ASSETS_DIR="$GITHUB_WORKSPACE/src_assets" SUNSHINE_ASSETS_DIR="$GITHUB_WORKSPACE/build" npm run build

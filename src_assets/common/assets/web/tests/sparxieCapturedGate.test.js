@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import test, { after, before } from 'node:test'
+import baseTest, { after, before } from 'node:test'
 import { startHarness } from './helpers/editorHarness.js'
 import { findAll, textOf } from './helpers/fakeDom.js'
 import { COPY } from '../utils/sparxie/copy.js'
@@ -12,6 +12,13 @@ import { COPY } from '../utils/sparxie/copy.js'
 //   change and save: the body goes to the host, 保存 is off again, and reopening the application as the host stored it (the host's own answer to that body) is clean again.
 // The two variants are a host with a Sparxie that has the touch-ui-switch capability (the patched build) and with one that has not.
 // Regenerate the host answers: see tests/sparxie/test_captured_gate.cpp. The bodies the editor sends are kept in fixtures/sparxie-captured-bodies.json (SPARXIE_GATE_WRITE_BODIES=1 rewrites it).
+// SPARXIE_GATE_SHARD=<index>/<total> (1-based, like node --test-shard) runs every <total>-th test of this file, so CI can spread it
+// over several jobs: the file alone takes as long as all the other test files together.
+const [shardIndex, shardTotal] = (process.env.SPARXIE_GATE_SHARD || '1/1').split('/').map(Number)
+let ordinal = 0
+const test = (name, fn) => {
+  if (ordinal++ % shardTotal === shardIndex - 1) baseTest(name, fn)
+}
 const fx = JSON.parse(readFileSync(new URL('./fixtures/sparxie-captured.json', import.meta.url), 'utf8'))
 const bodiesUrl = new URL('./fixtures/sparxie-captured-bodies.json', import.meta.url)
 const committedBodies = existsSync(bodiesUrl) ? JSON.parse(readFileSync(bodiesUrl, 'utf8')) : null
