@@ -41,6 +41,7 @@ jobs:
           robocopy "$env:GITHUB_WORKSPACE" "$($part.DriveLetter):\ws" /E /NFL /NDL /NJH /NJS /NP /MT:16 | Out-Null
           "copy workspace to dev drive: $([int](New-TimeSpan $s (Get-Date)).TotalSeconds) s"
           "DEV=$($part.DriveLetter):\ws" | Out-File -Append $env:GITHUB_ENV
+          $global:LASTEXITCODE = 0
       - name: Locate workspace
         run: echo "WS=${DEV:-$GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
       - name: Defender exclusions
