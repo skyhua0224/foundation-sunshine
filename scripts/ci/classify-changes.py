@@ -12,6 +12,7 @@ normally $GITHUB_OUTPUT):
   installer  installer shell, installer packaging, the Panel pin
   workflow   any workflow or CI script changed (static checks)
   docs       nothing but documentation, images and issue templates changed
+  docs_touched  at least one documentation file changed (the link check runs for it even next to code changes)
   any_code   cpp or webui or installer
 
 The rules are conservative: a path no rule knows is C++, never documentation, so a missing rule costs a build and
@@ -65,12 +66,14 @@ def categories(path):
 
 
 def classify(paths):
-    flags = {"cpp": False, "webui": False, "installer": False, "workflow": False, "docs": False}
+    flags = {"cpp": False, "webui": False, "installer": False, "workflow": False, "docs": False, "docs_touched": False}
     only_docs = bool(paths)
     for path in paths:
         found = categories(path)
         for name in found:
             flags[name] = True
+        if "docs" in found:
+            flags["docs_touched"] = True
         if found != {"docs"}:
             only_docs = False
     flags["docs"] = only_docs
@@ -85,7 +88,7 @@ def main() -> int:
     args = parser.parse_args()
     paths = [line.strip() for line in sys.stdin if line.strip()]
     if args.all or not paths:
-        flags = {"cpp": True, "webui": True, "installer": True, "workflow": True, "docs": False, "any_code": True}
+        flags = {"cpp": True, "webui": True, "installer": True, "workflow": True, "docs": False, "docs_touched": True, "any_code": True}
     else:
         flags = classify(paths)
     lines = [f"{key}={'true' if value else 'false'}" for key, value in flags.items()]

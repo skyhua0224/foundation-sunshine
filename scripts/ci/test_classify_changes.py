@@ -24,6 +24,10 @@ class ClassifyTest(unittest.TestCase):
         f = flags("README.md", "src/config.cpp")
         self.assertFalse(f["docs"])
         self.assertTrue(f["cpp"])
+        self.assertTrue(f["docs_touched"])
+
+    def test_code_only_touches_no_docs(self):
+        self.assertFalse(flags("src/config.cpp")["docs_touched"])
 
     def test_unknown_path_is_cpp(self):
         f = flags("brand_new_dir/file.txt")
