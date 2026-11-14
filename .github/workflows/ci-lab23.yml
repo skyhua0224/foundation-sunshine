@@ -33,8 +33,8 @@ jobs:
           mm=$(curl -s https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest | python3 -c "import json,sys;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('ucrt-x86_64.zip')][0])")
           curl -fsSL -o llvm-mingw.zip "$mm" && unzip -q llvm-mingw.zip -d llvm-mingw && echo "llvm-mingw ok"
           ls /c/bench/winlibs/mingw64/bin/g++.exe /c/bench/llvm-mingw/*/bin/clang++.exe || true
-          echo "--- MSYS2 gcc configure line"; g++ -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -20
-          echo "--- WinLibs gcc configure line"; /c/bench/winlibs/mingw64/bin/g++.exe -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -30
+          echo "--- MSYS2 gcc configure line"; (g++ -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -20) || true
+          echo "--- WinLibs gcc configure line"; (/c/bench/winlibs/mingw64/bin/g++.exe -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -30) || true
           true
       - name: Benchmark translation units
         shell: msys2 {0}
