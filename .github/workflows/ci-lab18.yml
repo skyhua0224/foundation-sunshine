@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
       - name: Select the revision
         run: |
-          if [ "${{ matrix.rev }}" = baseline ]; then git checkout -q 4d030eee; fi
+          if [ "${{ matrix.rev }}" = baseline ]; then git checkout -q 4d030eee && git checkout ${{ github.sha }} -- .github/actions; fi
           git log --oneline -1
       - name: Targeted submodules
         run: |
