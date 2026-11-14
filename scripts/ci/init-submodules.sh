@@ -37,25 +37,33 @@ sparse_submodule() {
 case "$profile" in
   none) exit 0 ;;
   windows)
+    t0=$SECONDS
+    stamp() { echo "[submodules] $1: $((SECONDS - t0)) s"; }
     sparse_submodule third-party/build-deps dist/Windows-AMD64 &
     sparse_submodule third-party/AMF amf/public/include &
+    # PyroWave is fetched in the same pass as the plain submodules; its nested Granite tree is the slowest chain, so that
+    # chain starts as soon as PyroWave is there and runs while moonlight-common-c (recursive) is fetched.
     update -- \
       third-party/googletest third-party/nanors third-party/nvapi third-party/ViGEmClient third-party/tray \
       third-party/nvenc-headers/1100 third-party/nvenc-headers/1200 \
       third-party/nvenc-headers/1300 third-party/nvenc-headers/1301 \
-      third-party/moonlight-audio-haptics
+      third-party/moonlight-audio-haptics third-party/pyrowave
+    stamp "plain submodules and pyrowave"
+    # PyroWave -> Granite. Granite lists Android, Linux-only and vendored-SDL submodules the Windows build never reads.
+    (
+      granite=third-party/pyrowave/third_party/Granite
+      git -C third-party/pyrowave submodule update --init --depth 1 --filter=blob:none -- third_party/Granite
+      git -C "$granite" submodule init
+      for skip in oboe fsr2 fossilize sdl3 pyroenc pyrowave; do
+        git -C "$granite" config --unset "submodule.third_party/$skip.url" || true
+      done
+      git -C "$granite" submodule update --init --depth 1 --filter=blob:none --jobs "$jobs"
+    ) &
     # moonlight-common-c carries enet and nanors/simde as nested submodules the build compiles.
     update --recursive -- third-party/moonlight-common-c
-    # PyroWave -> Granite. Granite lists Android, Linux-only and vendored-SDL submodules the Windows build never reads.
-    update -- third-party/pyrowave
-    granite=third-party/pyrowave/third_party/Granite
-    git -C third-party/pyrowave submodule update --init --depth 1 --filter=blob:none -- third_party/Granite
-    git -C "$granite" submodule init
-    for skip in oboe fsr2 fossilize sdl3 pyroenc pyrowave; do
-      git -C "$granite" config --unset "submodule.third_party/$skip.url" || true
-    done
-    git -C "$granite" submodule update --init --depth 1 --filter=blob:none --jobs "$jobs"
+    stamp "moonlight-common-c"
     wait
+    stamp "all"
     ;;
   *) echo "unknown profile: $profile" >&2; exit 2 ;;
 esac
