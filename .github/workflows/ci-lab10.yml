@@ -1,0 +1,60 @@
+name: ci-lab10
+# Fork-only: print and diff the compile commands that different targets use for the same source file.
+on:
+  push:
+    branches: ["ci/lab10-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  commands:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Toolchain
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
+          pacman --noconfirm -U ${opus_tarball}
+      - name: Configure and diff commands
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab10
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab10
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure.log 2>&1 || { tail -25 configure.log; exit 1; }
+          ninja -C build -t commands sunshine test_sunshine abr_unit_tests > commands.txt 2>/dev/null || true
+          wc -l commands.txt
+          norm() { sed -E 's#-o [^ ]+##; s#-MF [^ ]+##; s#-MT [^ ]+##; s#-c [^ ]+##' ; }
+          show() { grep -E "$1" commands.txt | head -1 | norm | tr ' ' '\n' | grep -E '^-[DIWOgfmsW]|^-std|^--' | sort -u; }
+          echo "### sunshine: src/config.cpp"; show 'sunshine\.dir/src/config\.cpp\.obj' > a.txt; wc -l a.txt
+          echo "### test_sunshine: src/config.cpp"; show 'test_sunshine\.dir/__/src/config\.cpp\.obj' > b.txt; wc -l b.txt
+          echo "### diff sunshine vs test_sunshine (< only sunshine, > only test_sunshine)"; diff a.txt b.txt || true
+          echo "### abr_unit_tests: src/streaming/abr.cpp vs sunshine"; show 'sunshine\.dir/src/streaming/abr\.cpp\.obj' > c.txt; show 'abr_unit_tests\.dir/__/src/streaming/abr\.cpp\.obj' > d.txt; diff c.txt d.txt || true
+          echo "### one full sunshine command"; grep -E 'sunshine\.dir/src/config\.cpp\.obj' commands.txt | head -1 | cut -c1-2500
