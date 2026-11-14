@@ -1,0 +1,418 @@
+name: CI
+
+# One entry point for pull requests, the merge queue, master, manual and nightly runs. A `changes` job reads the changed
+# files and routes the work; `ci-gate` is the single required status check. A skipped *job* reports success, while a
+# workflow skipped by `on.paths` leaves its checks pending and blocks the merge (GitHub Docs, "Troubleshooting required
+# status checks"), so nothing here uses `on.paths`.
+
+on:
+  pull_request:
+    branches: [master]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      toolchain:
+        description: "Compiler for the Windows build"
+        type: choice
+        default: gcc
+        options: [gcc, clang]
+      full:
+        description: "Run every job regardless of the changed files"
+        type: boolean
+        default: true
+  schedule:
+    # Nightly full run (both compilers) that also refreshes the compiler cache of the default branch.
+    - cron: "17 20 * * *"
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Only pull request runs are superseded; master, merge queue and nightly runs always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      cpp: ${{ steps.classify.outputs.cpp }}
+      webui: ${{ steps.classify.outputs.webui }}
+      installer: ${{ steps.classify.outputs.installer }}
+      workflow: ${{ steps.classify.outputs.workflow }}
+      docs: ${{ steps.classify.outputs.docs }}
+      docs_touched: ${{ steps.classify.outputs.docs_touched }}
+      any_code: ${{ steps.classify.outputs.any_code }}
+      toolchains: ${{ steps.toolchains.outputs.list }}
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+
+      # The file list comes from the REST API: no history to fetch and no third-party action in the path.
+      - name: Classify the change
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          FULL: ${{ inputs.full }}
+        run: |
+          set -euo pipefail
+          : > files.txt
+          case "$EVENT" in
+            pull_request)
+              gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' > files.txt ;;
+            push)
+              if [[ ! "$BEFORE" =~ ^0+$ ]]; then
+                gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename' > files.txt
+              fi ;;
+          esac
+          # An unknown or truncated list (very large change, manual or nightly run, merge queue) means "run everything".
+          if [[ "$EVENT" == merge_group || "$EVENT" == schedule || "$FULL" == true || $(wc -l < files.txt) -ge 3000 ]]; then : > files.txt; fi
+          python3 scripts/ci/classify-changes.py --output "$GITHUB_OUTPUT" < files.txt
+
+      - name: Pick the compilers
+        id: toolchains
+        env:
+          EVENT: ${{ github.event_name }}
+          CHOSEN: ${{ inputs.toolchain }}
+        run: |
+          case "$EVENT" in
+            schedule) echo 'list=["gcc","clang"]' >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch) echo "list=[\"$CHOSEN\"]" >> "$GITHUB_OUTPUT" ;;
+            *) echo 'list=["gcc"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  docs-check:
+    name: Documentation links
+    needs: changes
+    if: needs.changes.outputs.docs_touched == 'true'
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check relative links and images
+        run: python3 scripts/ci/check-doc-links.py --root .
+
+  workflow-lint:
+    name: Workflow lint
+    needs: changes
+    if: needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: actionlint (pinned release)
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          # style and info findings (quoting habits) are not failures; warnings and errors are
+          SHELLCHECK_OPTS: --severity=warning
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tgz "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+          ./actionlint -color
+      - name: Shell syntax of every run block (also msys2 steps, which actionlint skips)
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --user pyyaml==6.0.3
+          python3 scripts/ci/check-workflow-shell.py
+      - name: CI script tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+
+  webui:
+    name: Web UI (shard ${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.webui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # The Web UI imports foundation-ui from a sibling directory (package.json: "file:../ds5-ui-m3e"). Pinned to a
+      # commit, installed with its dev and peer dependencies: vue is both, and without it three test files fail to load.
+      - name: foundation-ui (pinned)
+        run: |
+          set -euo pipefail
+          sha="$(tr -d '[:space:]' < scripts/ci/foundation-ui.sha)"
+          dir="$GITHUB_WORKSPACE/../ds5-ui-m3e"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth 1 https://github.com/AlkaidLab/foundation-ui "$sha"
+          git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          npm ci --prefix "$dir" --no-audit --no-fund
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # Lint, locale check and build are a few seconds; they run once, in shard 1.
+      - name: Lint
+        if: matrix.shard == 1
+        run: npm run lint:webui
+
+      # One test file (sparxieCapturedGate) takes as long as all the others together, so it is sharded by test
+      # (SPARXIE_GATE_SHARD) and the other files by file (node --test-shard); both processes run side by side.
+      - name: Tests
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -uo pipefail
+          dir=src_assets/common/assets/web/tests
+          gate=sparxieCapturedGate.test.js
+          files=()
+          for f in "$dir"/*.test.js; do [ "${f##*/}" = "$gate" ] || files+=("$f"); done
+          common=(--import foundation-ui/testing/no-network --test --test-reporter=spec --test-reporter-destination=stdout)
+          node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-files.xml --test-shard="$SHARD/4" "${files[@]}" &
+          others=$!
+          SPARXIE_GATE_SHARD="$SHARD/4" node "${common[@]}" --test-reporter=junit --test-reporter-destination=webui-junit-gate.xml "$dir/$gate" &
+          gate_pid=$!
+          status=0
+          wait "$others" || status=1
+          wait "$gate_pid" || status=1
+          exit $status
+
+      - name: Report
+        if: always()
+        run: python3 scripts/ci/report-junit.py --title "Web UI tests (shard ${{ matrix.shard }}/4)" --min-tests 40 webui-junit-files.xml webui-junit-gate.xml
+
+      # Informational: translations lag behind the English file by design (Crowdin fills them in), so missing or
+      # untranslated keys are reported as a warning with the numbers and do not fail the run.
+      - name: Locale files (informational)
+        if: matrix.shard == 1
+        run: |
+          set +e
+          npm run i18n:validate > i18n.log 2>&1
+          status=$?
+          head -60 i18n.log
+          if [ $status -ne 0 ]; then
+            echo "::warning title=Locale files::$(grep -c 'Issues found' i18n.log) locale files differ from en.json (see the log of this step)"
+          fi
+          exit 0
+
+      - name: Build
+        if: matrix.shard == 1
+        run: |
+          mkdir -p build
+          SUNSHINE_SOURCE_ASSETS_DIR="$GITHUB_WORKSPACE/src_assets" SUNSHINE_ASSETS_DIR="$GITHUB_WORKSPACE/build" npm run build
+
+  win-build:
+    name: Windows (${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.cpp == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ${{ fromJSON(needs.changes.outputs.toolchains) }}
+    permissions:
+      contents: read
+    env:
+      # Same trust rules as before: the read-only token and the private SDK credentials reach CMake only for events that run
+      # trusted code (same-repository pull requests, the merge queue, master, manual and nightly runs).
+      TRUSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Submodules (only what the Windows build reads)
+        shell: bash
+        run: scripts/ci/init-submodules.sh windows
+
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      # Only master and the nightly run save the cache (see "Save compiler cache"); everything else restores it. Pull
+      # request entries live in their own scope and would only crowd the repository quota.
+      - name: Restore compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-win-${{ matrix.toolchain }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-win-${{ matrix.toolchain }}-
+
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          GITHUB_TOKEN: ${{ env.TRUSTED == 'true' && github.token || '' }}
+          RTX_VIDEO_SDK_URL: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && env.TRUSTED == 'true') && secrets.RTX_VIDEO_SDK_URL || '' }}
+          RTX_VIDEO_SDK_TOKEN: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && env.TRUSTED == 'true') && secrets.DRIVER_DOWNLOAD_TOKEN || '' }}
+          RTX_VIDEO_NGX_APPLICATION_ID: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && env.TRUSTED == 'true') && secrets.RTX_VIDEO_NGX_APPLICATION_ID || '' }}
+          SUNSHINE_RTX_HDR: ${{ !(github.repository == 'AlkaidLab/foundation-sunshine' && env.TRUSTED == 'true') && 'OFF' || ((github.event_name == 'push' && github.ref == 'refs/heads/master') && 'ON' || 'AUTO') }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          SUNSHINE_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          SUNSHINE_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          SUNSHINE_BUILD_CHANNEL: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') && 'beta' || 'dev' }}
+          SUNSHINE_BUILD_BUILDER: ci
+          SUNSHINE_BUILD_CI_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DRIVER_DEPS_REQUIRED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'OFF' || 'ON' }}
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          # Hash the compiler binary, not its mtime: the cache stays valid across runs that did not change the compiler.
+          CCACHE_COMPILERCHECK: content
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          ccache --zero-stats
+          compiler=()
+          if [[ "$TOOLCHAIN" == clang ]]; then compiler=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld); fi
+          cmake -B build -G Ninja -S . "${compiler[@]}" \
+            -DBUILD_DOCS=OFF \
+            -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
+            -DBUILD_TESTS=ON \
+            -DBUILD_TRAY_TESTS=ON \
+            -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DDRIVER_DEPS_REQUIRED="$DRIVER_DEPS_REQUIRED" \
+            -DSUNSHINE_PUBLISHER_NAME='${{ github.repository_owner }}' \
+            -DSUNSHINE_PUBLISHER_WEBSITE='https://github.com/AlkaidLab/foundation-sunshine' \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL='https://github.com/AlkaidLab/foundation-sunshine/issues'
+
+      - name: Build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          set -o pipefail
+          # -k 0 keeps going after a failure so one run lists every broken target.
+          ninja -C build -k 0 2>&1 | tee build.log
+          {
+            echo "### Build"
+            echo '```'
+            ccache --show-stats
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Native tests
+        shell: msys2 {0}
+        run: |
+          set -o pipefail
+          ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml"
+
+      - name: Report
+        if: always()
+        shell: msys2 {0}
+        run: python3 scripts/ci/report-junit.py --title "Native tests (${{ matrix.toolchain }})" --min-tests 80 --allowed-skips scripts/ci/allowed-skips.txt ctest.xml
+
+      - name: Save compiler cache
+        # Forks that run this workflow on their own have no default-branch lineage to restore from, so there the pull request
+        # runs save too (the next push of the same pull request restores it).
+        if: ${{ !cancelled() && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.repository != 'AlkaidLab/foundation-sunshine') }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-win-${{ matrix.toolchain }}-${{ github.run_id }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-results-${{ matrix.toolchain }}
+          path: ctest.xml
+          retention-days: 7
+          compression-level: 6
+
+  # Keeps exactly one compiler-cache entry per compiler (the newest). Entries pile up one per run otherwise, and when the
+  # 10 GB repository quota fills, LRU eviction once took the whole lineage and forced a 47-minute cold rebuild.
+  cache-prune:
+    name: Prune compiler cache
+    needs: win-build
+    if: ${{ !cancelled() && needs.win-build.result == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete older entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Page through the API: `gh cache list` stops at 100 entries. Only entries from older runs are deleted (run ids
+          # increase), so concurrent runs converge on the newest entry and never race down to none.
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | test("^ccache-win-(gcc|clang)-[0-9]+$")) | [.id, .key] | @tsv' |
+          while IFS=$'\t' read -r id key; do
+            run="${key##*-}"
+            if (( run < RUN_ID )); then gh cache delete "$id" --repo "$REPO" && echo "pruned $key"; fi
+          done
+
+  # The single required status check. `always()` is what keeps a failed or cancelled job from being skipped past:
+  # a job whose dependency failed is skipped, and a skipped required check counts as passing.
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [changes, docs-check, workflow-lint, webui, win-build]
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every needed job succeeded or was deliberately skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          bad = {name: job["result"] for name, job in needs.items() if job["result"] not in ("success", "skipped")}
+          for name, job in needs.items():
+              print(f"{name}: {job['result']}")
+          if needs["changes"]["result"] != "success":
+              bad["changes"] = needs["changes"]["result"]
+          if bad:
+              print(f"::error title=CI gate::{bad}")
+              sys.exit(1)
+          PY

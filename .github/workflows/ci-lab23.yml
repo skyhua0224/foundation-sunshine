@@ -1,0 +1,125 @@
+name: ci-lab23
+# Fork-only: compiler binaries. Same sources, same flags, interleaved repeats on one VM: MSYS2 GCC 16.2.0 against the WinLibs GCC 16.2.0 build,
+# MSYS2 Clang 23.1.5 (libstdc++) and llvm-mingw Clang (libc++, so not strictly comparable).
+on:
+  push:
+    branches: ["ci/lab23-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  binaries:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Toolchain (MSYS2 gcc, clang, boost, openssl, nlohmann)
+        uses: ./.github/actions/windows-toolchain
+        with:
+          toolchain: clang
+      - name: Headers and compilers
+        shell: msys2 {0}
+        run: |
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed $P-boost unzip
+          mkdir -p /c/bench && cd /c/bench
+          curl -fsSL -o winlibs.7z "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-23.1.3-14.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r3.7z" && "/c/Program Files/7-Zip/7z.exe" x -y -owinlibs winlibs.7z > /dev/null && echo "winlibs ok"
+          mm=$(curl -s https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest | python3 -c "import json,sys;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('ucrt-x86_64.zip')][0])")
+          curl -fsSL -o llvm-mingw.zip "$mm" && unzip -q llvm-mingw.zip -d llvm-mingw && echo "llvm-mingw ok"
+          ls /c/bench/winlibs/mingw64/bin/g++.exe /c/bench/llvm-mingw/*/bin/clang++.exe || true
+          echo "--- MSYS2 gcc configure line"; g++ -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -20
+          echo "--- WinLibs gcc configure line"; /c/bench/winlibs/mingw64/bin/g++.exe -v 2>&1 | grep "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-" | head -30
+          true
+      - name: Benchmark translation units
+        shell: msys2 {0}
+        run: |
+          cd /c/bench
+          cat > http.cpp <<'CPP'
+          #include <boost/asio.hpp>
+          #include <boost/asio/ssl.hpp>
+          #include <boost/beast/core.hpp>
+          #include <boost/beast/http.hpp>
+          #include <boost/beast/websocket.hpp>
+          #include <memory>
+          namespace beast = boost::beast; namespace http = beast::http; namespace net = boost::asio; using tcp = net::ip::tcp;
+          struct session : std::enable_shared_from_this<session> {
+            beast::tcp_stream stream; beast::flat_buffer buffer; http::request<http::string_body> req;
+            explicit session(tcp::socket&& s) : stream(std::move(s)) {}
+            void run() { http::async_read(stream, buffer, req, [self = shared_from_this()](beast::error_code ec, std::size_t) {
+              if (ec) return; auto res = std::make_shared<http::response<http::string_body>>(http::status::ok, self->req.version());
+              res->body() = "ok"; res->prepare_payload();
+              http::async_write(self->stream, *res, [self, res](beast::error_code, std::size_t) { self->stream.socket().shutdown(tcp::socket::shutdown_send); }); }); }
+          };
+          struct listener : std::enable_shared_from_this<listener> {
+            net::io_context& ioc; tcp::acceptor acceptor;
+            listener(net::io_context& c, tcp::endpoint e) : ioc(c), acceptor(c, e) {}
+            void accept() { acceptor.async_accept([self = shared_from_this()](beast::error_code ec, tcp::socket s) { if (!ec) std::make_shared<session>(std::move(s))->run(); self->accept(); }); }
+          };
+          int run_http() { net::io_context ioc; net::ssl::context ctx(net::ssl::context::tls_server);
+            beast::websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws(ioc, ctx);
+            std::make_shared<listener>(ioc, tcp::endpoint(tcp::v4(), 8080))->accept(); ioc.run(); return 0; }
+          CPP
+          cat > json.cpp <<'CPP'
+          #include <nlohmann/json.hpp>
+          #include <chrono>
+          #include <map>
+          #include <string>
+          #include <vector>
+          #include <sstream>
+          #include <optional>
+          using nlohmann::json;
+          struct item { std::string name; int v; std::optional<double> x; };
+          void to_json(json& j, const item& i) { j = json{{"name", i.name}, {"v", i.v}, {"x", i.x ? json(*i.x) : json()}}; }
+          void from_json(const json& j, item& i) { j.at("name").get_to(i.name); j.at("v").get_to(i.v); if (!j.at("x").is_null()) i.x = j.at("x").get<double>(); }
+          std::string roundtrip(const std::string& text) { auto j = json::parse(text); std::vector<item> v = j.at("items").get<std::vector<item>>();
+            json out; out["items"] = v; out["at"] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            std::ostringstream os; os << out.dump(2); return os.str(); }
+          CPP
+          cat > log.cpp <<'CPP'
+          #include <boost/log/common.hpp>
+          #include <boost/log/sinks.hpp>
+          #include <boost/log/sources/severity_logger.hpp>
+          #include <boost/log/utility/setup/file.hpp>
+          #include <boost/property_tree/ptree.hpp>
+          #include <boost/property_tree/json_parser.hpp>
+          #include <sstream>
+          namespace bl = boost::log;
+          void setup(const std::string& file) { bl::sources::severity_logger<int> lg; bl::add_file_log(file); BOOST_LOG(lg) << "start"; }
+          boost::property_tree::ptree load(const std::string& s) { std::istringstream is(s); boost::property_tree::ptree t; boost::property_tree::read_json(is, t); return t; }
+          CPP
+          sed -i 's/^          //' http.cpp json.cpp log.cpp
+          python3 - <<'PY'
+          import subprocess, time, statistics, os, glob
+          inc = ["-idirafter", "C:/msys64/ucrt64/include"]
+          llvm = glob.glob("/c/bench/llvm-mingw/*/bin/clang++.exe")[0]
+          comps = {
+            "msys2-gcc":    ["C:/msys64/ucrt64/bin/g++.exe"] + inc,
+            "winlibs-gcc":  ["C:/bench/winlibs/mingw64/bin/g++.exe"] + inc,
+            "msys2-clang":  ["C:/msys64/ucrt64/bin/clang++.exe"] + inc,
+            "llvm-mingw-libcxx": [llvm.replace("/c/", "C:/")] + inc,
+          }
+          common = ["-std=c++23", "-O2", "-DNDEBUG", "-DBOOST_ASIO_NO_DEPRECATED", "-c"]
+          res = {}
+          for rep in range(1, 4):
+            for name, base in comps.items():
+              for src in ("http.cpp", "json.cpp", "log.cpp"):
+                t = time.perf_counter()
+                r = subprocess.run(base + common + [src, "-o", f"{name}-{src}.o"], capture_output=True, text=True, cwd="C:/bench")
+                dt = time.perf_counter() - t
+                res.setdefault((name, src), []).append((dt, r.returncode))
+                if r.returncode and rep == 1: print("FAILED", name, src, r.stderr[:300].replace("\n", " | "))
+          print("compiler            http.cpp          json.cpp          log.cpp         (median of 3, s)")
+          for name in comps:
+            row = []
+            for src in ("http.cpp", "json.cpp", "log.cpp"):
+              v = res[(name, src)]
+              row.append("%8.1f%s" % (statistics.median(x for x, _ in v), "*" if any(c for _, c in v) else " "))
+            print("%-20s %s" % (name, "  ".join(row)))
+          print("(* = at least one compile failed)")
+          PY

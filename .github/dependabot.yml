@@ -1,0 +1,13 @@
+# Keeps the full-commit-SHA pins of GitHub Actions current. Dependabot updates the pin and the trailing "# vX.Y.Z"
+# comment together (GitHub Docs, "Security hardening for GitHub Actions").
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

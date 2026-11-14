@@ -1,0 +1,101 @@
+name: ci-lab9
+# Fork-only measurement lab 9: workspace on the runner D: drive vs a ReFS Dev Drive, with and without Defender exclusions.
+on:
+  push:
+    branches: ["ci/lab9-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  leg:
+    name: ${{ matrix.where }} defender-${{ matrix.defender }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        where: [d-drive, dev-drive]
+        defender: ["off", "on"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Dev Drive (ReFS VHDX, trusted)
+        if: matrix.where == 'dev-drive'
+        shell: pwsh
+        run: |
+          $vhd = 'C:\devdrive.vhdx'
+          New-VHD -Path $vhd -SizeBytes 24GB -Dynamic | Out-Null
+          $disk = Mount-VHD -Path $vhd -Passthru | Initialize-Disk -PartitionStyle GPT -PassThru
+          $part = $disk | New-Partition -AssignDriveLetter -UseMaximumSize
+          try { Format-Volume -DriveLetter $part.DriveLetter -DevDrive -FileSystem ReFS -Confirm:$false -ErrorAction Stop | Out-Null; "formatted as Dev Drive" }
+          catch { "Format-Volume -DevDrive failed: $_"; Format-Volume -DriveLetter $part.DriveLetter -FileSystem ReFS -Confirm:$false | Out-Null; "formatted as plain ReFS" }
+          fsutil devdrv query "$($part.DriveLetter):"
+          $s = Get-Date
+          robocopy "$env:GITHUB_WORKSPACE" "$($part.DriveLetter):\ws" /E /NFL /NDL /NJH /NJS /NP /MT:16 | Out-Null
+          "copy workspace to dev drive: $([int](New-TimeSpan $s (Get-Date)).TotalSeconds) s"
+          "DEV=$($part.DriveLetter):\ws" | Out-File -Append $env:GITHUB_ENV
+          $global:LASTEXITCODE = 0
+      - name: Locate workspace
+        run: echo "WS=${DEV:-$GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+      - name: Defender exclusions
+        if: matrix.defender == 'on'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1plus.exe','cc1.exe','as.exe','ld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Toolchain
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
+          pacman --noconfirm -U ${opus_tarball}
+          echo "pacman wall: $(( $(date +%s) - start )) s"
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab9
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab9
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          CCACHE_DIR: ${{ env.WS }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd "$WS"; start=$(date +%s); mkdir -p build; ccache --zero-stats
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          echo "configure wall: $(( $(date +%s) - start )) s"
+      - name: Build subset cold then warm
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ env.WS }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          cd "$WS"
+          ninja -C build -t targets all | grep -E '^CMakeFiles/sunshine\.dir/src/[A-Za-z0-9_]+\.cpp\.obj:' | cut -d: -f1 | head -48 > subset.txt
+          start=$(date +%s); ninja -C build $(cat subset.txt) > /dev/null 2>&1; echo "subset cold wall: $(( $(date +%s) - start )) s"
+          for o in $(cat subset.txt); do rm -f "build/$o"; done
+          start=$(date +%s); ninja -C build $(cat subset.txt) > /dev/null 2>&1; echo "subset warm wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats | grep -E "Hits|Misses" | head -3

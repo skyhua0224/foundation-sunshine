@@ -3,14 +3,9 @@ name: Build and Release
 # Published releases are owned by sign-and-repackage.yml. Keeping that event
 # out of this workflow prevents a release created below from starting another
 # build-and-release cycle.
+# Pull requests are validated by ci.yml (routing, Web UI, Windows build and tests). This workflow keeps the master and
+# manual builds that package and publish until the merge-queue promotion replaces them.
 on:
-  pull_request:
-    branches:
-      - master
-    types:
-      - opened
-      - synchronize
-      - reopened
   push:
     branches:
       - master
@@ -494,9 +489,6 @@ jobs:
           fi
           if grep -Ei 'nvngx_(truehdr|dlssnr)\.dll|hdr-components\.json' portable-files.txt; then
             echo "Side-loaded HDR files and mutable trust metadata must not be included in the main portable package"
-            exit 1
-          fi
-            echo "The optional DualSense runtime leaked into the main portable package"
             exit 1
           fi
 

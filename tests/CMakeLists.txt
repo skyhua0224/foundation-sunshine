@@ -104,7 +104,9 @@ if (WIN32)
     set_target_properties(ds5_native_usbip_smoke PROPERTIES
             CXX_STANDARD 23
             LINK_SEARCH_START_STATIC 1)
+    # Exit code 77 = skipped: the smoke needs the usbip-win2 client (and its driver) installed on the host.
     add_test(NAME ds5_native_usbip_smoke COMMAND ds5_native_usbip_smoke 30000)
+    set_tests_properties(ds5_native_usbip_smoke PROPERTIES SKIP_RETURN_CODE 77)
 endif ()
 
 if (WIN32)
@@ -269,6 +271,11 @@ add_executable(default_apps_unit_tests ${CMAKE_SOURCE_DIR}/tests/unit/test_defau
 target_sources(default_apps_unit_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src/default_apps.cpp
         ${CMAKE_SOURCE_DIR}/src/file_handler.cpp)
+if (WIN32)
+    # file_handler.cpp converts paths with platf::from_utf8/to_utf8.
+    target_sources(default_apps_unit_tests PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/text_encoding.cpp)
+endif ()
 target_include_directories(default_apps_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 target_link_libraries(default_apps_unit_tests PRIVATE gtest_main Boost::boost Boost::log Boost::format Boost::property_tree sunshine_project_options sunshine_coverage)
 set_target_properties(default_apps_unit_tests PROPERTIES CXX_STANDARD 23)
@@ -1338,10 +1345,19 @@ if (WIN32)
             ${TRUEHDR_ADAPTER_LOADER_TEST_SOURCE})
 endif ()
 
-set(SUNSHINE_SOURCES
-        ${SUNSHINE_HOST_SOURCES}
-        ${PLATFORM_TARGET_FILES}
-        ${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Ds5HapticsIrStream.c)
+if(SUNSHINE_SHARED_HOST_OBJECTS_ENABLED)
+    # The host sources are compiled once (sunshine_host_objects); only the files that depend on test-only
+    # definitions are compiled again here, with them.
+    set(SUNSHINE_SOURCES
+            ${SUNSHINE_SEAM_SOURCES}
+            $<TARGET_OBJECTS:sunshine_host_objects>
+            ${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Ds5HapticsIrStream.c)
+else()
+    set(SUNSHINE_SOURCES
+            ${SUNSHINE_HOST_SOURCES}
+            ${PLATFORM_TARGET_FILES}
+            ${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Ds5HapticsIrStream.c)
+endif()
 
 add_executable(${PROJECT_NAME} ${TEST_SOURCES})
 target_sources(${PROJECT_NAME} PRIVATE
@@ -1354,15 +1370,12 @@ if (WIN32)
 endif ()
 # The network overview in the host sources uses the STUN codec on every platform.
 target_link_libraries(${PROJECT_NAME} PRIVATE alkaidlab_stun_codec)
+# The adapter definitions are set per source file in cmake/targets/common.cmake.
 if (TARGET sunshine_rtx_video_adapter)
     add_dependencies(${PROJECT_NAME} sunshine_rtx_video_adapter)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${RTX_VIDEO_TRUST_INCLUDE}")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_RTX_VIDEO_ADAPTER)
 endif ()
 if (TARGET sunshine_dlssnr_adapter)
     add_dependencies(${PROJECT_NAME} sunshine_dlssnr_adapter)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${DLSSNR_TRUST_INCLUDE}")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_DLSSNR_ADAPTER)
 endif ()
 
 foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
@@ -1378,6 +1391,10 @@ target_link_libraries(${PROJECT_NAME}
         gtest
         ${PLATFORM_LIBRARIES}
         sunshine_project_options sunshine_coverage sunshine_crypto sunshine_ai_provider sunshine_ai_stream)
+if (WIN32)
+    # src/sparxie/platform.cpp downloads through WinHTTP, as the sunshine target links it.
+    target_link_libraries(${PROJECT_NAME} PRIVATE winhttp)
+endif ()
 target_compile_definitions(${PROJECT_NAME} PUBLIC
         SUNSHINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
         ${SUNSHINE_DEFINITIONS}

@@ -1,0 +1,57 @@
+name: ci-lab19
+# Fork-only: where does session_auth_routes_unit_tests crash (about 15% of runs on the baseline)?
+on:
+  push:
+    branches: ["ci/lab19-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  stack:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Baseline revision (master plus the test fixes of the open PR, none of the CI changes)
+        run: |
+          git checkout -q 4d030eee && git checkout ${{ github.sha }} -- .github/actions
+          git show ${{ github.sha }}:scripts/ci/init-submodules.sh > /tmp/ism.sh
+          bash /tmp/ism.sh windows
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+      - name: Debugger
+        shell: msys2 {0}
+        run: pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gdb
+      - name: Build with line tables and catch a crash
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab19
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab19
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          cmake -B build -G Ninja -S . -DCMAKE_CXX_FLAGS=-g1 -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure.log 2>&1 || { tail -20 configure.log; exit 1; }
+          ninja -C build -k 0 session_auth_routes_unit_tests > build.log 2>&1; echo "built: $?"
+          exe=build/tests/session_auth_routes_unit_tests.exe
+          for i in $(seq 1 80); do
+            gdb -batch -ex "set pagination off" -ex "run" -ex "bt 30" -ex "info threads" -ex "thread apply all bt 12" "$exe" > gdb-$i.log 2>&1
+            if grep -q "SIGSEGV\|Segmentation\|EXCEPTION_ACCESS_VIOLATION\|received signal" gdb-$i.log; then
+              echo "crash on run $i"; grep -n "received signal\|Segmentation\|Access violation" gdb-$i.log | head -3
+              sed -n '/^#0/,/^#30/p' gdb-$i.log | head -34 | cut -c1-230
+              echo "---- other threads"; sed -n '/^Thread/,$p' gdb-$i.log | head -60 | cut -c1-200
+              break
+            fi
+          done
+          echo "RESULT finished after $i runs"

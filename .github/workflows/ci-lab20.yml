@@ -1,0 +1,64 @@
+name: ci-lab20
+# Fork-only: which change made session_auth_routes_unit_tests stop crashing - with or without the Asio/Beast separate compilation commit?
+on:
+  push:
+    branches: ["ci/lab20-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  crash:
+    name: ${{ matrix.rev }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [without-sep, with-sep]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select the revision
+        run: |
+          if [ "${{ matrix.rev }}" = without-sep ]; then target=5d5dcadd^; else target=5d5dcadd; fi
+          git checkout -q "$target" && git checkout ${{ github.sha }} -- .github/actions
+          git log --oneline -1
+      - name: Targeted submodules
+        run: |
+          # older revisions do not have the script: take it from the tip
+          git show ${{ github.sha }}:scripts/ci/init-submodules.sh > /tmp/ism.sh
+          bash /tmp/ism.sh windows
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+      - name: Build the test and run it many times, alone and four at a time
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab18
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab18
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure.log 2>&1 || { tail -20 configure.log; exit 1; }
+          ninja -C build -k 0 session_auth_routes_unit_tests > build.log 2>&1; echo "built: $?"; tail -2 build.log | cut -c1-160
+          exe=build/tests/session_auth_routes_unit_tests.exe
+          crashes=0
+          for i in $(seq 1 40); do "$exe" > run-$i.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then crashes=$((crashes+1)); echo "run $i exit $rc"; tail -4 run-$i.log | cut -c1-160; fi; done
+          echo "RESULT ${{ matrix.rev }} alone: $crashes crashes in 40 runs"
+          crashes=0
+          for r in $(seq 1 10); do
+            for k in 1 2 3 4; do "$exe" > par-$r-$k.log 2>&1 & done
+            wait
+            for k in 1 2 3 4; do grep -q "PASSED" par-$r-$k.log || { crashes=$((crashes+1)); echo "parallel round $r copy $k failed:"; tail -4 par-$r-$k.log | cut -c1-160; }; done
+          done
+          echo "RESULT ${{ matrix.rev }} four at a time: $crashes failures in 40 runs"

@@ -1,0 +1,135 @@
+name: ci-lab
+# Measurement lab for the CI redesign. Runs only on ci/lab-* branches of a fork; never part of the product pipeline.
+on:
+  push:
+    branches: ["ci/lab-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  sig-overlay:
+    name: Authenticode vs appended payload
+    runs-on: windows-latest
+    steps:
+      - name: Sign a PE that carries an appended payload and footer
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP sig; New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item C:\Windows\System32\whoami.exe "$d\shell.exe"
+          $payload = [byte[]](1..200) * 50
+          $footer = [Text.Encoding]::ASCII.GetBytes("`nALKAID-SHELL-PAYLOAD-V1`noffset=1`nsize=2`nsha256=00`n")
+          $fs = [IO.File]::Open("$d\shell.exe", Append); $fs.Write($payload, 0, $payload.Length); $fs.Write($footer, 0, $footer.Length); $fs.Close()
+          $before = (Get-Item "$d\shell.exe").Length
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-lab -CertStoreLocation Cert:\CurrentUser\My
+          $r = Set-AuthenticodeSignature -FilePath "$d\shell.exe" -Certificate $cert
+          "sign status=$($r.Status) size before=$before after=$((Get-Item "$d\shell.exe").Length)"
+          $b = [IO.File]::ReadAllBytes("$d\shell.exe"); $n = 1024
+          $tail = [Text.Encoding]::ASCII.GetString($b, $b.Length - $n, $n)
+          "footer found in the last 1024 bytes after signing: $($tail.Contains(ALKAID-SHELL-PAYLOAD-V1))"
+          $pe = [BitConverter]::ToInt32($b, 0x3c); $opt = $pe + 24
+          $dd = if ([BitConverter]::ToUInt16($b, $opt) -eq 0x20b) { $opt + 112 } else { $opt + 96 }
+          $off = [BitConverter]::ToUInt32($b, $dd + 32); $sz = [BitConverter]::ToUInt32($b, $dd + 36)
+          "certificate table offset=$off size=$sz (footer ended at $before)"
+          # a byte of the overlay changed after signing must invalidate the signature (Authenticode_PE step 14)
+          $c = $b.Clone(); $c[$before - 60] = $c[$before - 60] -bxor 1; [IO.File]::WriteAllBytes("$d\tampered.exe", $c)
+          "overlay tampered after signing -> $((Get-AuthenticodeSignature "$d\tampered.exe").Status)"
+          # data appended AFTER signing
+          $e = $b + [byte[]](1..64); [IO.File]::WriteAllBytes("$d\appended-after.exe", $e)
+          "bytes appended after signing -> $((Get-AuthenticodeSignature "$d\appended-after.exe").Status)"
+          "untouched signed file -> $((Get-AuthenticodeSignature "$d\shell.exe").Status)  (UnknownError/NotTrusted is expected: self-signed root)"
+
+  checkout-v0:
+    name: checkout recursive (current)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { submodules: recursive }
+        env: { GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: core.longpaths, GIT_CONFIG_VALUE_0: "true", GIT_CONFIG_KEY_1: submodule.fetchJobs, GIT_CONFIG_VALUE_1: "8" }
+      - run: du -sh . .git/modules third-party 2>/dev/null
+
+  checkout-v1:
+    name: checkout targeted
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Targeted submodules
+        run: time scripts/ci/init-submodules.sh windows
+      - run: du -sh . .git/modules third-party 2>/dev/null
+
+  baseline:
+    name: cold build baseline
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget curl
+      - name: Update Windows dependencies
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          dependencies=(git mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cppwinrt mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-graphviz mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-onevpl mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-autotools)
+          pacman -Syu --noconfirm "${dependencies[@]}"
+          pacman --noconfirm -U ${opus_tarball}
+          pacman -Q | grep -E "mingw-w64-ucrt-x86_64-(gcc|cmake|ninja|ccache|lld|binutils|openssl|curl-winssl) " | tee "$GITHUB_WORKSPACE/toolchain-versions.txt" || true
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          SUNSHINE_RTX_HDR: "OFF"
+          BRANCH: ${{ github.ref_name }}
+          BUILD_VERSION: lab.杂鱼
+          COMMIT: ${{ github.sha }}
+          SUNSHINE_BUILD_COMMIT: ${{ github.sha }}
+          SUNSHINE_BUILD_BRANCH: ${{ github.ref_name }}
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          SUNSHINE_BUILD_CI_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          DRIVER_DEPS_REQUIRED: "OFF"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build; ccache --zero-stats
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+      - name: Build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          start=$(date +%s); ninja -C build; echo "ninja wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats --verbose
+      - name: Tests
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure --output-junit "$GITHUB_WORKSPACE/ctest.xml"
+      - name: Save cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab-ccache-${{ github.run_id }}
+      - name: Upload timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: baseline-timings
+          path: |
+            build/.ninja_log
+            ctest.xml
+            toolchain-versions.txt

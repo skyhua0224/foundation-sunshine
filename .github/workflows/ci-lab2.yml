@@ -1,0 +1,182 @@
+name: ci-lab2
+# Fork-only measurement lab 2: ccache direct-mode diagnosis, Defender exclusions, lld.
+on:
+  push:
+    branches: ["ci/exp-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  ccache-diag:
+    name: ccache diag (defender exclusion ${{ matrix.defender }})
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        defender: ["off", "on"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Targeted submodules
+        run: time scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions
+        if: matrix.defender == 'on'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1plus.exe','cc1.exe','as.exe','ld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+          (Get-MpPreference).ExclusionPath
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget curl
+      - name: Update Windows dependencies
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          dependencies=(git mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cppwinrt mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-graphviz mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-onevpl mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-autotools)
+          pacman -Syu --noconfirm "${dependencies[@]}"
+          pacman --noconfirm -U ${opus_tarball}
+          echo "pacman wall: $(( $(date +%s) - start )) s"
+      - name: Configure A
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-exp
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-exp
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s); mkdir -p build; ccache --zero-stats
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          echo "configure wall: $(( $(date +%s) - start )) s"
+      - name: Build subset (cold cache)
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          ninja -C build -t targets all | grep -E '^CMakeFiles/sunshine\.dir/src/[A-Za-z0-9_]+\.cpp\.obj:' | cut -d: -f1 | head -48 > subset.txt
+          wc -l subset.txt
+          start=$(date +%s); ninja -C build $(cat subset.txt); echo "subset cold wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats --verbose
+          grep -l 'nvhttp.h' $(sed -e 's#CMakeFiles/sunshine.dir/##' -e 's#\.obj$##' subset.txt | sed 's#^#src_placeholder/#' | head -0) 2>/dev/null || true
+      - name: Next commit, objects gone, same ccache
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          BRANCH: ci-exp
+          BUILD_VERSION: lab.zayu
+          COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SUNSHINE_BUILD_BRANCH: ci-exp
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ccache --zero-stats
+          cmake -B build >/dev/null
+          for o in $(cat subset.txt); do rm -f "build/$o"; done
+          export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache-b.log"
+          start=$(date +%s); ninja -C build $(cat subset.txt); echo "subset warm wall: $(( $(date +%s) - start )) s"
+          ccache --show-stats --verbose
+          echo "direct hits:       $(grep -c 'Result: direct_cache_hit' ccache-b.log || true)"
+          echo "preprocessed hits: $(grep -c 'Result: preprocessed_cache_hit' ccache-b.log || true)"
+          echo "misses:            $(grep -c 'Result: cache_miss' ccache-b.log || true)"
+          echo "--- first reasons seen for a direct-mode miss:"
+          grep -E "Manifest|manifest|Hash of|include file|Failed to find|differs|not found" ccache-b.log | sed 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -25
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccache-diag-${{ matrix.defender }}
+          path: |
+            ccache-b.log
+            subset.txt
+            build/.ninja_log
+
+  link-lld:
+    name: link GNU ld vs lld
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget curl
+      - name: Update Windows dependencies
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          dependencies=(git mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cppwinrt mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-graphviz mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-onevpl mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-autotools)
+          pacman -Syu --noconfirm "${dependencies[@]}"
+          pacman --noconfirm -U ${opus_tarball}
+          ld --version | head -1; ld.lld --version | head -1
+      - name: Configure and build tests (GNU ld)
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-exp
+          BUILD_VERSION: lab.zayu
+          COMMIT: cccccccccccccccccccccccccccccccccccccccc
+          SUNSHINE_BUILD_COMMIT: cccccccccccccccccccccccccccccccccccccccc
+          SUNSHINE_BUILD_CHANNEL: dev
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          T="http_safety_unit_tests webhook_transport_tests beast_http_unit_tests abr_unit_tests app_scan_unit_tests"
+          start=$(date +%s); ninja -C build $T; echo "build GNU ld wall: $(( $(date +%s) - start )) s"
+          cp build/.ninja_log ninja_log_gnu.txt
+          echo "$T" > targets.txt
+      - name: Relink with lld
+        shell: msys2 {0}
+        run: |
+          cmake -B build -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld >/dev/null
+          rm -f build/.ninja_log
+          start=$(date +%s); ninja -C build $(cat targets.txt); echo "relink lld wall: $(( $(date +%s) - start )) s"
+          cp build/.ninja_log ninja_log_lld.txt
+          for t in http_safety_unit_tests beast_http_unit_tests abr_unit_tests; do build/tests/$t.exe --gtest_brief=1 | tail -2; done
+          python3 - <<'PY'
+          import re
+          for tag in ("gnu","lld"):
+              tot=0
+              for l in open(f"ninja_log_{tag}.txt"):
+                  p=l.split("\t")
+                  if len(p)>3 and re.search(r"_tests?(\.exe)?$", p[3]) and not p[3].endswith(".obj"):
+                      d=int(p[1])-int(p[0]); tot+=d; print(tag, p[3].strip(), d, "ms")
+              print(tag, "total link ms", tot)
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: link-lld
+          path: |
+            ninja_log_gnu.txt
+            ninja_log_lld.txt

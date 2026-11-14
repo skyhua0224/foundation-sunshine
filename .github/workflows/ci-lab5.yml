@@ -1,0 +1,143 @@
+name: ci-lab5
+# Fork-only measurement lab 5: compile-time techniques on top of Defender exclusions and a minimal package set.
+on:
+  push:
+    branches: ["ci/lab5-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  leg:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: g-min, cmake: "", ccache_sloppy: "", pack: "yes", patch: "" }
+          - { name: g-O2, cmake: "-DCMAKE_C_FLAGS_RELEASE=-O2\\ -DNDEBUG -DCMAKE_CXX_FLAGS_RELEASE=-O2\\ -DNDEBUG", ccache_sloppy: "", pack: "no", patch: "" }
+          - { name: g-O1, cmake: "-DCMAKE_C_FLAGS_RELEASE=-O1\\ -DNDEBUG -DCMAKE_CXX_FLAGS_RELEASE=-O1\\ -DNDEBUG", ccache_sloppy: "", pack: "no", patch: "" }
+          - { name: g-pch, cmake: "", ccache_sloppy: "pch_defines,time_macros", pack: "no", patch: "pch" }
+          - { name: g-unity8, cmake: "-DCMAKE_UNITY_BUILD=ON -DCMAKE_UNITY_BUILD_BATCH_SIZE=8", ccache_sloppy: "", pack: "no", patch: "" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1plus.exe','cc1.exe','as.exe','ld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe','iscc.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Minimal toolchain (no gdb, graphviz, autotools)
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl $P-python
+          pacman --noconfirm -U ${opus_tarball}
+          echo "pacman minimal wall: $(( $(date +%s) - start )) s; packages installed: $(pacman -Q | wc -l)"
+          g++ --version | head -1; cmake --version | head -1
+      - name: Patch (pch)
+        if: matrix.patch == 'pch'
+        run: |
+          cat > cmake/lab_pch.cmake <<'PCH'
+          foreach(_t sunshine test_sunshine)
+            if(TARGET ${_t})
+              target_precompile_headers(${_t} PRIVATE
+                "$<$<COMPILE_LANGUAGE:CXX>:<string$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<vector$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<algorithm$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<chrono$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<optional$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<string_view$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<mutex$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<memory$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<filesystem$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<thread$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<functional$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<map$<ANGLE-R>>" "$<$<COMPILE_LANGUAGE:CXX>:<unordered_map$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<nlohmann/json.hpp$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<boost/log/sources/severity_logger.hpp$<ANGLE-R>>"
+                "$<$<COMPILE_LANGUAGE:CXX>:<boost/property_tree/ptree.hpp$<ANGLE-R>>")
+            endif()
+          endforeach()
+          PCH
+          sed -i 's/^          //' cmake/lab_pch.cmake
+          echo 'include(${CMAKE_SOURCE_DIR}/cmake/lab_pch.cmake)' >> CMakeLists.txt
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab5
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab5
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+          CCACHE_SLOPPINESS: ${{ matrix.ccache_sloppy }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          start=$(date +%s); mkdir -p build; ccache --zero-stats
+          eval cmake -B build -G Ninja -S . ${{ matrix.cmake }} -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          echo "configure wall: $(( $(date +%s) - start )) s"
+      - name: Cold build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 3G
+          CCACHE_COMPILERCHECK: content
+          CCACHE_SLOPPINESS: ${{ matrix.ccache_sloppy }}
+        run: |
+          start=$(date +%s)
+          ninja -C build -k 0 > build-cold.log 2>&1 || true
+          echo "cold build wall: $(( $(date +%s) - start )) s"
+          echo "FAILED edges: $(grep -c '^FAILED' build-cold.log || true)   warnings: $(grep -c 'warning:' build-cold.log || true)"
+          grep -E '^FAILED|error:' build-cold.log | head -15 | cut -c1-220
+          ccache --show-stats --verbose | head -20
+          cp build/.ninja_log ninja_log_cold.txt
+          ls -l build/sunshine.exe build/tests/test_sunshine.exe 2>&1 | awk '{print $5, $9}'
+      - name: Tests (parallel)
+        shell: msys2 {0}
+        run: |
+          start=$(date +%s)
+          ctest --test-dir build -j4 --output-on-failure --output-junit "$GITHUB_WORKSPACE/ctest.xml" > ctest.log 2>&1 || true
+          tail -6 ctest.log; echo "ctest -j4 wall: $(( $(date +%s) - start )) s"
+      - name: Packaging benchmark
+        if: matrix.pack == 'yes'
+        shell: msys2 {0}
+        run: |
+          cd build
+          s=$(date +%s); cmake --install . --prefix ./inno_staging > install.log 2>&1 || tail -5 install.log; echo "cmake --install: $(( $(date +%s) - s )) s"; du -sh inno_staging | tail -1
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          for v in ultra64 max normal fast; do
+            sed "s#^Compression=.*#Compression=lzma2/$v#" sunshine_installer.iss > iss_$v.iss
+            s=$(date +%s); "$ISCC" iss_$v.iss > iscc_$v.log 2>&1 || tail -3 iscc_$v.log
+            f=$(ls cpack_artifacts/*.exe 2>/dev/null | head -1); echo "ISCC lzma2/$v: $(( $(date +%s) - s )) s size=$(stat -c %s "$f" 2>/dev/null)"
+          done
+          sed "s#^Compression=.*#Compression=lzma2/ultra64\nLZMANumBlockThreads=4#" sunshine_installer.iss > iss_threads.iss
+          s=$(date +%s); "$ISCC" iss_threads.iss > iscc_threads.log 2>&1 || tail -3 iscc_threads.log; f=$(ls cpack_artifacts/*.exe | head -1); echo "ISCC ultra64 +LZMANumBlockThreads=4: $(( $(date +%s) - s )) s size=$(stat -c %s "$f")"
+          s=$(date +%s); cpack -G ZIP --config ./CPackConfig.cmake > cpack.log 2>&1 || tail -3 cpack.log; echo "cpack ZIP: $(( $(date +%s) - s )) s size=$(stat -c %s cpack_artifacts/Sunshine.zip 2>/dev/null)"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lab5-${{ matrix.name }}
+          path: |
+            ninja_log_cold.txt
+            ctest.xml
+            build-cold.log
+          compression-level: 6

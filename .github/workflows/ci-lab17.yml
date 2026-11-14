@@ -1,0 +1,45 @@
+name: ci-lab17
+# Fork-only: does the Asio/Beast separate-compilation switch configure, compile, link and pass the HTTP tests?
+on:
+  push:
+    branches: ["ci/lab17-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  sep:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+      - name: Configure, build the targets that use Asio and Beast, run their tests
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab17
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab17
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
+          grep -c BOOST_ASIO_SEPARATE_COMPILATION build.ninja | sed 's/^/build.ninja lines with the definition: /'
+          T="sunshine_boost_separate http_safety_unit_tests beast_http_unit_tests webhook_transport_tests session_auth_routes_unit_tests test_sunshine"
+          start=$(date +%s)
+          ninja -C build -k 0 $T > build.log 2>&1
+          echo "build wall: $(( $(date +%s) - start )) s; failed edges: $(grep -c '^FAILED' build.log)"
+          grep -E '^FAILED|error:|undefined reference|multiple definition' build.log | head -20 | cut -c1-220
+          ctest --test-dir build -R "http_safety|beast_http|webhook_transport|session_auth|^test_sunshine$" --output-on-failure -j4 2>&1 | tail -12

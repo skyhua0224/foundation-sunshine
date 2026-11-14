@@ -1,0 +1,182 @@
+name: ci-lab21
+# Fork-only: Asio/Beast separate compilation, precompiled headers, GCC vs clang, measured on one VM per suite with interleaved repeats.
+on:
+  push:
+    branches: ["ci/lab21-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # translation units that stand for the build: the heavy HTTP/Beast ones, platform code, config, crypto, tests
+  TU_SUFFIXES: "src/http/server.cpp src/http/client.cpp src/nvhttp.cpp src/confighttp.cpp src/rtsp.cpp src/stream.cpp src/video.cpp src/config.cpp src/audio.cpp src/process.cpp src/crypto.cpp src/network.cpp src/file_mapping/file_mapping_ws_session.cpp src/platform/windows/misc.cpp src/platform/windows/display_vram.cpp src/nvhttp/pairing.cpp src/confighttp/doctor.cpp src/sparxie/runtime.cpp src/telemetry/telemetry.cpp unit/test_crypto.cpp unit/test_confighttp_routes.cpp tools/test_http_safety.cpp src/display_device/settings.cpp src/webhook/webhook.cpp"
+defaults:
+  run:
+    shell: bash
+jobs:
+  suite:
+    name: ${{ matrix.suite }}
+    runs-on: windows-latest
+    timeout-minutes: 175
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [pch]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP, 'C:\llvm', 'C:\winlibs'
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1.exe','cc1plus.exe','clang.exe','clang++.exe','as.exe','ld.exe','ld.lld.exe','ninja.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Toolchain (gcc + clang from MSYS2)
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git diffutils $P-cmake $P-ninja $P-gcc $P-clang $P-lld $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-python $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl
+          pacman --noconfirm -U ${opus_tarball}
+          g++ --version | head -1; clang++ --version | head -1
+          echo "gcc build configuration:"; g++ -v 2>&1 | grep -E "^Configured with" | tr ' ' '\n' | grep -E "^--(enable|with)-(lto|bootstrap|profile|build-config|checking|languages)" | head
+          pacman -Qi mingw-w64-ucrt-x86_64-clang | grep -E "^Version|^Build Date|^Packager"
+          pacman -Qi mingw-w64-ucrt-x86_64-gcc | grep -E "^Version|^Build Date|^Packager"
+      - name: Configure one build directory per variant
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab13
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab13
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          common=(-G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF)
+          clang=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
+          O() { echo "-DCMAKE_C_FLAGS_RELEASE=$1 -DCMAKE_CXX_FLAGS_RELEASE=$1"; }
+          declare -A V
+          cat > "$GITHUB_WORKSPACE/pch-apply.cmake" <<'CM'
+          # Precompile the heavy headers for every C++ target of this project (not Boost, not third-party).
+          set(_alk_hdrs "$ENV{ALK_PCH_HEADERS}")
+          set(_alk_hdrs_light "$ENV{ALK_PCH_HEADERS_LIGHT}")
+          function(_alk_collect dir out)
+            get_property(_t DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+            get_property(_s DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+            foreach(sub IN LISTS _s)
+              _alk_collect("${sub}" _sub)
+              list(APPEND _t ${_sub})
+            endforeach()
+            set(${out} "${_t}" PARENT_SCOPE)
+          endfunction()
+          function(_alk_apply)
+            _alk_collect("${CMAKE_SOURCE_DIR}" targets)
+            foreach(t IN LISTS targets)
+              get_target_property(type ${t} TYPE)
+              get_target_property(sdir ${t} SOURCE_DIR)
+              if(type MATCHES "EXECUTABLE|STATIC_LIBRARY|OBJECT_LIBRARY" AND NOT sdir MATCHES "_deps|third-party|googletest" AND NOT t STREQUAL "sunshine_crypto")
+                set(_h_list ${_alk_hdrs})
+                if(t STREQUAL "sunshine_http")
+                  set(_h_list ${_alk_hdrs_light})
+                endif()
+                foreach(h IN LISTS _h_list)
+                  target_precompile_headers(${t} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${h}>")
+                endforeach()
+              endif()
+            endforeach()
+          endfunction()
+          cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _alk_apply)
+          CM
+          sed -i 's/^          //' "$GITHUB_WORKSPACE/pch-apply.cmake"
+          STD='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>;<nlohmann/json.hpp>;<boost/log/sources/severity_logger.hpp>;<boost/property_tree/ptree.hpp>'
+          NET='<boost/asio.hpp>;<boost/asio/ssl.hpp>;<boost/beast/core.hpp>;<boost/beast/http.hpp>;<boost/beast/websocket.hpp>'
+          pch() { echo "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=$(cygpath -m "$GITHUB_WORKSPACE")/pch-apply.cmake"; }
+          case "${{ matrix.suite }}" in
+            sep)
+              V[gcc-base]=""
+              V[gcc-sep]="-DCMAKE_CXX_FLAGS=-DBOOST_ASIO_SEPARATE_COMPILATION\ -DBOOST_BEAST_SEPARATE_COMPILATION" ;;
+            pch)
+              V[gcc-base]=""
+              V[gcc-pch-std]="$(pch)"
+              V[gcc-pch-net]="$(pch)"
+              V[clang-base]="${clang[*]}"
+              V[clang-pch-net]="${clang[*]} $(pch)"
+              V[clang-pch-net-inst]="${clang[*]} $(pch) -DCMAKE_CXX_FLAGS=-fpch-instantiate-templates" ;;
+            gccclang)
+              V[gcc-base]=""
+              V[clang-base]="${clang[*]}"
+              V[gcc-O2]="$(O '-O2\ -DNDEBUG')"
+              V[clang-O2]="${clang[*]} $(O '-O2\ -DNDEBUG')" ;;
+          esac
+          : > variants.txt
+          for name in "${!V[@]}"; do
+            echo "== configure $name"
+            LIGHT='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>'
+            export ALK_PCH_HEADERS_LIGHT="$LIGHT;$NET"
+            case "$name" in *pch-std) export ALK_PCH_HEADERS="$STD"; export ALK_PCH_HEADERS_LIGHT="$LIGHT" ;; *pch-net*) export ALK_PCH_HEADERS="$STD;$NET" ;; esac
+            if eval cmake -B "build-$name" "${common[@]}" ${V[$name]} > "configure-$name.log" 2>&1; then echo "$name" >> variants.txt; else echo "configure FAILED for $name"; tail -6 "configure-$name.log"; fi
+          done
+          sort variants.txt -o variants.txt; echo "variants: $(tr '\n' ' ' < variants.txt)"
+      - name: Pick the translation units and warm up
+        shell: msys2 {0}
+        run: |
+          first=$(head -1 variants.txt)
+          ninja -C "build-$first" -t targets all > targets.txt
+          : > tus.txt
+          for s in $TU_SUFFIXES; do
+            line=$(grep -E "(^|/)${s//./\\.}\.obj:" targets.txt | grep -v "dir/__/" | head -1 | cut -d: -f1)
+            [ -n "$line" ] && echo "$line" >> tus.txt || echo "no object for $s"
+          done
+          wc -l tus.txt
+          # the same object names exist in every directory; build them once per variant (warm-up, not timed) to create generated headers
+          for v in $(cat variants.txt); do
+            ninja -C "build-$v" -k 0 $(cat tus.txt) > "warm-$v.log" 2>&1 || echo "warm-up failures in $v: $(grep -c '^FAILED' warm-$v.log)"
+          done
+      - name: Timed passes (3 interleaved repeats)
+        shell: msys2 {0}
+        run: |
+          for r in 1 2 3; do
+            for v in $(cat variants.txt); do
+              for o in $(cat tus.txt); do rm -f "build-$v/$o"; done
+              s=$(date +%s.%N)
+              ninja -C "build-$v" -k 0 -j4 $(cat tus.txt) > "run-$v-$r.log" 2>&1 || true
+              e=$(date +%s.%N)
+              echo "RESULT $v $r $(echo "$e - $s" | bc 2>/dev/null || python3 -c "print(round($e-$s,1))") failed=$(grep -c '^FAILED' run-$v-$r.log)"
+            done
+          done | tee results.txt
+          python3 - <<'PY'
+          import collections, statistics
+          t = collections.defaultdict(list); bad = collections.defaultdict(int)
+          for line in open("results.txt"):
+              p = line.split()
+              if len(p) >= 5 and p[0] == "RESULT":
+                  t[p[1]].append(float(p[3])); bad[p[1]] += int(p[4].split("=")[1])
+          base = statistics.median(t["gcc-base"]) if t.get("gcc-base") else None
+          print("variant, runs, median s, min s, max s, vs gcc-base, failed edges")
+          for v in sorted(t):
+              m = statistics.median(t[v])
+              print(f"{v:14s} {len(t[v])} {m:8.1f} {min(t[v]):8.1f} {max(t[v]):8.1f} {('%.2fx' % (m/base)) if base else '-'} {bad[v]}")
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lab14-${{ matrix.suite }}
+          path: |
+            results.txt
+            run-*.log
+            warm-*.log
+            configure-*.log
+          compression-level: 6
+
