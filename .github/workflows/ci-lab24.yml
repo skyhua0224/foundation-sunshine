@@ -1,0 +1,45 @@
+name: ci-lab24
+# Fork-only: can the setup-msys2 package cache make the toolchain step faster? A = install list through pacman (current), B = install list given to setup-msys2 (its cache covers it). Push twice: the second run has the cache.
+on:
+  push:
+    branches: ["ci/lab24-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+jobs:
+  a-pacman:
+    runs-on: windows-latest
+    steps:
+      - name: MSYS2 with wget only
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Packages through pacman
+        shell: msys2 {0}
+        run: |
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git diffutils $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git $P-pkgconf $P-make $P-python $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl
+  b-cached:
+    runs-on: windows-latest
+    steps:
+      - name: MSYS2 with the whole package list
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: >-
+            wget git diffutils
+            mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils mingw-w64-ucrt-x86_64-crt-git mingw-w64-ucrt-x86_64-headers-git
+            mingw-w64-ucrt-x86_64-winpthreads-git mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-cppwinrt mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-MinHook mingw-w64-ucrt-x86_64-miniupnpc mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-libvpl mingw-w64-ucrt-x86_64-openssl
+      - name: Verify
+        shell: msys2 {0}
+        run: g++ --version | head -1
