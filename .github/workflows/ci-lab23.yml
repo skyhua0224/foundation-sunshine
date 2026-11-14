@@ -97,12 +97,12 @@ jobs:
           python3 - <<'PY'
           import subprocess, time, statistics, os, glob
           inc = ["-idirafter", "C:/msys64/ucrt64/include"]
-          llvm = glob.glob("/c/bench/llvm-mingw/*/bin/clang++.exe")[0]
+          llvm = glob.glob("C:/bench/llvm-mingw/*/bin/clang++.exe")[0]
           comps = {
             "msys2-gcc":    ["C:/msys64/ucrt64/bin/g++.exe"] + inc,
             "winlibs-gcc":  ["C:/bench/winlibs/mingw64/bin/g++.exe"] + inc,
             "msys2-clang":  ["C:/msys64/ucrt64/bin/clang++.exe"] + inc,
-            "llvm-mingw-libcxx": [llvm.replace("/c/", "C:/")] + inc,
+            "llvm-mingw-libcxx": [llvm.replace("\\", "/")] + inc,
           }
           common = ["-std=c++23", "-O2", "-DNDEBUG", "-DBOOST_ASIO_NO_DEPRECATED", "-c"]
           res = {}
