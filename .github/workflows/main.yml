@@ -633,17 +633,99 @@ jobs:
             echo 'rtx_hdr=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dump preprocessed output (cache investigation)
+      - name: Dump preprocessed output 1
         shell: msys2 {0}
         run: |
           python3 scripts/ci/dump_preprocessed.py
-          { echo "### ccache"; ccache --version | head -1; ccache -p | grep -E "base_dir|hash_dir|sloppiness|compiler_check|compression|max_size|depend_mode|direct_mode"; } | tee -a "$GITHUB_STEP_SUMMARY"
-          env | grep -E "^(CCACHE|BRANCH|COMMIT|BUILD_VERSION|SUNSHINE_)" | sort
+          mv pre pre1
+
+      - name: Reconfigure with another build identity
+        id: configure_windows_2
+        shell: msys2 {0}
+        env:
+          # Only trusted events may expose the read-only token to PR-controlled CMake code.
+          GITHUB_TOKEN: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.token || '' }}
+          # Same-repository PRs are trusted; fork PRs never receive the private credential.
+          RTX_VIDEO_SDK_URL: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && secrets.RTX_VIDEO_SDK_URL || '' }}
+          RTX_VIDEO_SDK_TOKEN: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && secrets.DRIVER_DOWNLOAD_TOKEN || '' }}
+          RTX_VIDEO_NGX_APPLICATION_ID: ${{ (github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && secrets.RTX_VIDEO_NGX_APPLICATION_ID || '' }}
+          SUNSHINE_RTX_HDR: ${{ !(github.repository == 'AlkaidLab/foundation-sunshine' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'AlkaidLab/foundation-sunshine')) && 'OFF' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/master') && 'ON' || inputs.rtx_hdr || 'AUTO' }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          BUILD_VERSION: ${{ needs.setup_release.outputs.release_tag }}.杂鱼
+          COMMIT: ${{ needs.setup_release.outputs.release_commit }}
+          # Build identity (cmake/prep/build_info.cmake): master builds carry the full commit too. A published build is a
+          # pre-release (beta); PRs and manual runs are dev builds. One build makes both packages, so the package stays auto.
+          SUNSHINE_BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          SUNSHINE_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          SUNSHINE_BUILD_CHANNEL: ${{ needs.setup_release.outputs.publish_release == 'true' && 'beta' || 'dev' }}
+          SUNSHINE_BUILD_BUILDER: ci
+          SUNSHINE_BUILD_CI_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # ccache.exe is a native binary, so it reads the Windows-style path
+          # straight out of the environment even under the msys2 shell.
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          # `pacman -Syu` can move the toolchain underneath us between runs.
+          # Hashing the compiler binary instead of its mtime keeps the cache
+          # valid across runs that did not actually change gcc.
+          CCACHE_COMPILERCHECK: content
+          # Fork PRs still try every public dependency. Keep the build usable
+          # when a release asset is temporarily unavailable; official builds
+          # continue to require the complete driver set.
+          DRIVER_DEPS_REQUIRED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'OFF' || 'ON' }}
+        run: |
+          rm -rf build
+          export SUNSHINE_BUILD_COMMIT=0123456789abcdef0123456789abcdef01234567 COMMIT=0123456789abcdef0123456789abcdef01234567
+          export BRANCH=other-branch SUNSHINE_BUILD_BRANCH=other-branch BUILD_VERSION=v2026.1.1.2 SUNSHINE_BUILD_CI_RUN=https://example.invalid/runs/2 SUNSHINE_BUILD_CHANNEL=beta
+          mkdir -p build
+          ccache --zero-stats
+          # The msys2 shell starts with a minimal PATH, so the runner's .NET SDK (C:\Program Files\dotnet) is invisible to CMake
+          # and tools/sparxie-launch would silently not be built or shipped.
+          export PATH="$PATH:/c/Program Files/dotnet"
+          gui_options=()
+          if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
+            gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
+          fi
+          cmake \
+            -B build \
+            -G Ninja \
+            -S . \
+            "${gui_options[@]}" \
+            -DBUILD_DOCS=OFF \
+            -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
+            -DBUILD_TESTS=ON \
+            -DBUILD_TRAY_TESTS=ON \
+            -DBUILD_WEB_UI=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DDRIVER_DEPS_REQUIRED=${DRIVER_DEPS_REQUIRED} \
+            -DSUNSHINE_PUBLISHER_NAME='${{ github.repository_owner }}' \
+            -DSUNSHINE_PUBLISHER_WEBSITE='https://github.com/AlkaidLab/foundation-sunshine' \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL='https://github.com/AlkaidLab/foundation-sunshine/issues'
+          if grep -q '^SUNSHINE_RTX_HDR_AVAILABLE:INTERNAL=TRUE' build/CMakeCache.txt; then
+            echo 'rtx_hdr=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'rtx_hdr=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dump preprocessed output 2 and compare
+        shell: msys2 {0}
+        run: |
+          python3 scripts/ci/dump_preprocessed.py
+          mv pre pre2
+          for f in pre1/*.i; do
+            n=$(basename "$f")
+            echo "=== $n: $(diff <(cat "$f") <(cat "pre2/$n") | grep -c '^[<>]') differing lines"
+            diff "$f" "pre2/$n" | head -40 | cut -c1-240
+          done
+          for f in pre1/*.cmd; do n=$(basename "$f"); echo "=== command $n"; diff <(tr ' ' '\n' < "$f") <(tr ' ' '\n' < "pre2/$n") | head -20; done
+          mkdir -p out && cp pre1/*.cmd out/ && for f in pre1/*config*.i; do cp "$f" out/a.i; cp "pre2/$(basename "$f")" out/b.i; done
 
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: pre-${{ github.run_number }}
-          path: pre
+          path: out
           retention-days: 3
 
       - name: Build Windows
