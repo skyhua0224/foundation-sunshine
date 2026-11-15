@@ -10,5 +10,13 @@
     "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
     "sha256": "cf2f2445fef0c5c14e372045f84998771eeb8bb01d59be4afd00692fa160082e",
     "signer": "Microsoft Corporation"
+  },
+  "setupUi": {
+    "repository": "skyhua0224/foundation-panel",
+    "tag": "setup-ui",
+    "commit": "d5f8b935c2726a110ab6644feb047898a641960c",
+    "foundationUi": "f874f69636a77e0ed548de64a355a77c0dbabffe",
+    "asset": "foundation-setup-ui-d5f8b935c2726a110ab6644feb047898a641960c-f874f69636a77e0ed548de64a355a77c0dbabffe.exe",
+    "sha256": "a51d299370fb52ac12ede5bbc8cdfba8c33ae70e9ad61bce0eeb6ea63d8f2cfb"
   }
 }
