@@ -94,10 +94,13 @@ jobs:
       - name: Pack the binaries
         run: |
           t0=$(date +%s)
-          cd build
-          find . \( -name '*.exe' -o -name '*.dll' -o -name 'CTestTestfile.cmake' -o -name 'DartConfiguration.tcl' \) -not -path './CMakeFiles/*' -print0 \
-            | tar --null -T - -cf - | zstd -T0 -3 -q -o ../xc-binaries.tar.zst
-          cd ..
+          rm -rf stage && mkdir stage
+          (cd build && find . \( -name '*.exe' -o -name '*.dll' -o -name 'CTestTestfile.cmake' -o -name 'DartConfiguration.tcl' \) -not -path './CMakeFiles/*' -print0 \
+            | tar --null -T - -cf - ) | tar -C stage -xf -
+          raw=$(du -sm stage | cut -f1)
+          find stage -name '*.exe' -print0 | xargs -0 -n8 -P4 x86_64-w64-mingw32ucrt-strip --strip-all
+          echo "BINARIES_MB_RAW=$raw stripped=$(du -sm stage | cut -f1)" | tee -a "$GITHUB_STEP_SUMMARY"
+          (cd stage && tar -cf - .) | zstd -T0 -3 -q -o xc-binaries.tar.zst
           ls -l xc-binaries.tar.zst | awk '{print "ARTIFACT_BYTES=" $5}' | tee -a "$GITHUB_STEP_SUMMARY"
           echo "PACK_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           mkdir -p facts
