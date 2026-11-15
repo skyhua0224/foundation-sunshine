@@ -19,6 +19,12 @@ function(_sunshine_add_pyrowave)
     # (https://cmake.org/cmake/help/latest/variable/CMAKE_POLICY_VERSION_MINIMUM.html).
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # Vendored submodule code we do not edit: volk.c redefines a typedef (a C11 feature) and Granite carries one unused
+        # function. These variables are local to this function, so they never reach our own targets.
+        string(APPEND CMAKE_C_FLAGS " -Wno-typedef-redefinition")
+        string(APPEND CMAKE_CXX_FLAGS " -Wno-unused-function")
+    endif()
     set(PYROWAVE_DEVEL OFF)
     set(PYROWAVE_UTILS OFF)
     set(PYROWAVE_BUILD_SHARED OFF)

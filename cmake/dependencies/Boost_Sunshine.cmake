@@ -118,8 +118,10 @@ if(NOT Boost_FOUND)
                 URL ${BOOST_URL}
                 URL_HASH ${BOOST_HASH}
         )
-    elseif(APPLE AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.25.0")
+    elseif((APPLE OR (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")) AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.25.0")
         # add SYSTEM to FetchContent_Declare, this fails on debian bookworm
+        # Windows with clang: Boost headers are not ours; its -Wdll-attribute-on-redeclaration and -Wunused-variable
+        # reports (boost/winapi, boost/process) would otherwise repeat in every translation unit.
         FetchContent_Declare(
                 Boost
                 URL ${BOOST_URL}

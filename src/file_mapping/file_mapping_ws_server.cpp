@@ -28,7 +28,6 @@ namespace file_mapping_ws {
     session_token_validator_t validate_token,
     client_uuid_authorizer_t authorize_peer_uuid,
     file_mapping::operations::execution_context_t operations_context):
-      io_(io),
       config_(std::move(config)),
       validate_token_(std::move(validate_token)),
       authorize_peer_uuid_(std::move(authorize_peer_uuid)),
