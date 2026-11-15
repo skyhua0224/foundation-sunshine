@@ -37,15 +37,30 @@
 
 ## 编译缓存
 
-- 保存：只有 master 的 push、手动运行和夜间构建保存（`ccache-windows-<run id>`，只保留最新一份，旧的由修剪步骤删除）。
+- 保存：只有 master 的 push、手动运行和夜间构建保存（`ccache-windows-<编译器>-<run id>`，每个编译器只保留最新一份，旧的由修剪步骤删除）。
   在自己 fork 里运行这个工作流时，fork 里的 pull request 也保存，因为 fork 没有上游 master 的缓存可恢复。
-- 恢复：除夜间构建外，所有运行按前缀 `ccache-windows-` 恢复最近的一份；夜间构建不恢复，从冷缓存开始编译。
+- 恢复：除夜间构建外，所有运行按前缀 `ccache-windows-<编译器>-` 恢复同一编译器最近的一份；夜间构建不恢复，从冷缓存开始编译。
   pull request 能读到 master 的缓存
   （缓存按分支隔离，pull request 可读基础分支，源 `github-docs-dependency-caching-20261115`）。
 - 命中的前提是编译器路径和系统头文件路径一致：MSYS2 由 setup-msys2 装在 runner 的临时目录（`D:\a\_temp\msys64`），不要改用镜像自带的
   `C:\msys64`。位置一变，所有预处理结果和缓存键都不同，整份缓存失效（实测同一份缓存：临时目录 98% 命中，`C:\msys64` 17%）。
 - 构建标识（提交、分支、渠道、CI 运行）不进入大多数编译单元：版本号只由 `src/build_info.cpp` 读取，
   新提交只会重编译这一个文件和真正改动的文件。
+
+## 编译器与编译速度
+
+Windows 构建默认用 Clang（MSYS2 UCRT64，libstdc++，lld）；GCC 保留为回退：手动运行选 `toolchain: gcc`，
+或把仓库变量 `CI_TOOLCHAIN` 设为 `gcc`（不需要提交）。两个编译器的缓存分开保存，互不替换。
+
+- Clang 比 GCC 快的主要原因是前端：同一虚拟机交错测量，24 个编译单元 0.70–0.88×（实验室 14）。
+- 预编译头（`src/precompiled.h`，选项 `SUNSHINE_PRECOMPILED_HEADERS`，CI 里只对 Clang 打开）：只给源文件不少于 8 个的目标
+  （主机对象库、`sunshine`、几个大的测试），小目标自己生成预编译头得不偿失。`windows.h` 故意不放进去：
+  有的源文件在它之前定义 `NTSTATUS` 相关宏。
+- ccache 的依赖模式（`CCACHE_DEPEND=1`）：未命中时不再单独跑一遍预处理，由编译器自己的 `-MD` 文件给出头文件列表；
+  命中耗时不变。预编译头要同时设 `CCACHE_SLOPPINESS=pch_defines,time_macros`，否则用到它的单元全部绕过缓存
+  （ccache 手册 *The depend mode*、*Precompiled headers*，源 `ccache-manual-20261115`）。
+- 没有采用：`-O1`（编译快约 11%，但测试和打包的就不是发布配置）、调试信息选项（发布构建本来就没有 `-g`，加上反而慢 20%）、
+  ninja 并行度（`-j4` 到 `-j8` 无差别，空闲内存始终超过 10 GB）、Defender 排除项（runner 的实时保护本来就是关的）。
 
 ## 发布
 

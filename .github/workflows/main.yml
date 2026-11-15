@@ -37,6 +37,13 @@ on:
         description: 'Build the installer setup UI from the Panel submodule instead of downloading the Panel repository build'
         type: boolean
         default: false
+      toolchain:
+        description: 'Compiler of the Windows build (clang is the default; gcc stays available as the fallback)'
+        type: choice
+        default: clang
+        options:
+          - 'clang'
+          - 'gcc'
       rtx_hdr:
         description: 'RTX HDR support for development branches (official master always requires ON)'
         type: choice
@@ -434,6 +441,10 @@ jobs:
       contents: read
       actions: write  # prune stale ccache entries after saving this run's
     runs-on: windows-latest
+    env:
+      # clang is the default compiler. Without a manual input, the repository variable CI_TOOLCHAIN (gcc or clang) overrides it,
+      # so the fallback to gcc is one setting and needs no commit.
+      TOOLCHAIN: ${{ inputs.toolchain || vars.CI_TOOLCHAIN || 'clang' }}
     steps:
       # Several Web UI tests match source text with \n in their patterns: check the sources out with LF on Windows too.
       - name: Keep LF line endings
@@ -456,6 +467,8 @@ jobs:
       # MSYS2 UCRT64 with the build tools, Defender exclusions for the build directories, and a record of the runner CPU.
       - name: Toolchain
         uses: ./.github/actions/windows-toolchain
+        with:
+          toolchain: ${{ env.TOOLCHAIN }}
 
       # Dependency drift canary (nightly only, informational): the installed package versions are kept as an artifact and
       # compared with the last successful nightly, so a red nightly can be tied to the packages that changed overnight.
@@ -573,9 +586,9 @@ jobs:
           # still consume the shared cache quota, and when that quota fills
           # (10 GB, LRU), eviction wiped the whole lineage once and forced a
           # full 47-minute cold rebuild.
-          key: ccache-windows-${{ github.run_id }}
+          key: ccache-windows-${{ env.TOOLCHAIN }}-${{ github.run_id }}
           restore-keys: |
-            ccache-windows-
+            ccache-windows-${{ env.TOOLCHAIN }}-
 
       # The Panel bundle and the WebView2 bootstrapper, pinned by tag/sha256 in scripts/installer-inputs.json and verified (never
       # "latest"). The pinned Panel commit must be the committed submodule. A manual run with gui_run_id replaces the GUI below.
@@ -643,10 +656,17 @@ jobs:
           if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
             gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
           fi
+          compiler=()
+          if [[ "$TOOLCHAIN" == clang ]]; then
+            # lld links the same objects as GNU ld at the same speed (measured), so this is only about one linker for the one
+            # compiler; the precompiled header cuts the parsing that dominates a cold build (src/precompiled.h).
+            compiler=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -DSUNSHINE_PRECOMPILED_HEADERS=ON)
+          fi
           cmake \
             -B build \
             -G Ninja \
             -S . \
+            "${compiler[@]}" \
             "${gui_options[@]}" \
             -DBUILD_DOCS=OFF \
             -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
@@ -672,6 +692,12 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}\.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
+          # Depend mode takes the include list from the compiler's own -MD file instead of running the preprocessor a second
+          # time: a miss costs 2.5% over no cache instead of 12% (measured on three VMs); hits cost the same. The precompiled
+          # header needs these two sloppiness settings to be cached at all, or every unit that uses it bypasses the cache.
+          # https://ccache.dev/manual/latest.html#_the_depend_mode and #_precompiled_headers
+          CCACHE_DEPEND: '1'
+          CCACHE_SLOPPINESS: pch_defines,time_macros
         run: |
           ninja -C build
           ccache --show-stats --verbose
@@ -735,7 +761,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}\.ccache
-          key: ccache-windows-${{ github.run_id }}
+          key: ccache-windows-${{ env.TOOLCHAIN }}-${{ github.run_id }}
 
       - name: Prune stale compiler cache entries
         # Collapse the cache to exactly one entry (the newest one saved).
@@ -756,12 +782,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $current = "ccache-windows-${{ github.run_id }}"
+          $current = "ccache-windows-$env:TOOLCHAIN-${{ github.run_id }}"
           # Page through the caches API instead of `gh cache list`: the
           # latter caps at --limit 100, and once this repo's other caches
           # (msys2, npm, ...) grow past that, stale ccache entries would
           # fall outside the window and never get pruned.
-          $all = @(gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/caches?per_page=100" --jq '.actions_caches[] | select(.key | test("^ccache-windows-[0-9]+$")) | [(.key | sub("^ccache-windows-";"") | tonumber), .id, .key] | @tsv' |
+          # Only this compiler's entries: the two lineages never replace each other.
+          $jq = '.actions_caches[] | select(.key | test("^ccache-windows-' + $env:TOOLCHAIN + '-[0-9]+$")) | [(.key | sub("^ccache-windows-' + $env:TOOLCHAIN + '-";"") | tonumber), .id, .key] | @tsv'
+          $all = @(gh api --paginate "repos/$env:GITHUB_REPOSITORY/actions/caches?per_page=100" --jq $jq |
             Where-Object { $_ } |
             ForEach-Object {
               $parts = $_ -split "`t"
