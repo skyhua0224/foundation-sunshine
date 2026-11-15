@@ -1,5 +1,9 @@
 name: Lab prepare
 description: Fork-only lab helper. Targeted submodules, the MSYS2 UCRT64 toolchain and the production-flag configure, so that every lab job starts from the same state.
+inputs:
+  shard:
+    description: 'true for a compile shard: no MAT capture package, no dotnet publish (neither changes an object command line)'
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -32,7 +36,12 @@ runs:
         t0=$(date +%s)
         mkdir -p build
         ccache --zero-stats
-        export PATH="$PATH:/c/Program Files/dotnet"
-        cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+        extra=()
+        if [ "${{ inputs.shard }}" = true ]; then
+          extra+=(-DSUNSHINE_BUILD_MAT_CAPTURE=OFF)
+        else
+          export PATH="$PATH:/c/Program Files/dotnet"
+        fi
+        cmake -B build "${extra[@]}" -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
         echo "configure $(( $(date +%s) - t0 )) s"

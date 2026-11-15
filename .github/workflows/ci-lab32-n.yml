@@ -26,6 +26,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/lab-prep
+        with:
+          shard: 'true'
       - name: Build this shard's compile outputs
         shell: msys2 {0}
         env:
@@ -92,6 +94,16 @@ jobs:
           path: ${{ github.workspace }}\.ccache
           key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}${{ inputs.weights && 'w' || 'h' }}-s2
       - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache' && inputs.count > 7
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}${{ inputs.weights && 'w' || 'h' }}-s7
+      - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache' && inputs.count > 6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}${{ inputs.weights && 'w' || 'h' }}-s6
+      - uses: actions/cache/restore@v6
         if: matrix.transport == 'cache' && inputs.count > 5
         with:
           path: ${{ github.workspace }}\.ccache
@@ -114,10 +126,14 @@ jobs:
           CCACHE_COMPILERCHECK: content
         run: |
           du -sh "$CCACHE_DIR"
+          export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache-final.log"
+          ccache --zero-stats
           t0=$(date +%s)
           ninja -C build
           echo "FINAL_BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           ccache --show-stats
+          echo "ccache misses in the build step: $(grep -c 'Result: cache_miss' "$CCACHE_LOGFILE")" | tee -a "$GITHUB_STEP_SUMMARY"
+          cp build/.ninja_log "$GITHUB_WORKSPACE/ninja_log.final"
       - name: Native tests
         shell: msys2 {0}
         run: |

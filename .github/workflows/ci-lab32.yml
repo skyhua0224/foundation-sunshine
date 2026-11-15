@@ -12,38 +12,12 @@ defaults:
   run:
     shell: bash
 jobs:
-  base:
-    name: base (one runner, cold)
-    runs-on: windows-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/lab-prep
-      - name: Build
-        shell: msys2 {0}
-        env:
-          CCACHE_DIR: ${{ github.workspace }}\.ccache
-          CCACHE_MAXSIZE: 2G
-          CCACHE_COMPILERCHECK: content
-        run: |
-          t0=$(date +%s)
-          ninja -C build
-          echo "BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
-          ccache --show-stats
-          cp build/.ninja_log "$GITHUB_WORKSPACE/ninja_log.base"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ninja-log-base
-          path: ninja_log.base
-          compression-level: 1
-  n4h:
-    uses: ./.github/workflows/ci-lab32-n.yml
-    with: { count: 4, indices: '[0,1,2,3]', weights: false }
   n4w:
     uses: ./.github/workflows/ci-lab32-n.yml
     with: { count: 4, indices: '[0,1,2,3]', weights: true }
   n6w:
     uses: ./.github/workflows/ci-lab32-n.yml
     with: { count: 6, indices: '[0,1,2,3,4,5]', weights: true }
+  n8w:
+    uses: ./.github/workflows/ci-lab32-n.yml
+    with: { count: 8, indices: '[0,1,2,3,4,5,6,7]', weights: true }
