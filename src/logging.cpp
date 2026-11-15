@@ -413,3 +413,4 @@ namespace logging {
   }
 
 }  // namespace logging
+// publish gate test
