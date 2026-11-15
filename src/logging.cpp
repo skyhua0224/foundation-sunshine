@@ -413,3 +413,7 @@ namespace logging {
   }
 
 }  // namespace logging
+
+namespace {
+  [[maybe_unused]] constexpr int cache_probe_value = 42;
+}  // namespace
