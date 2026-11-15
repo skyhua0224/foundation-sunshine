@@ -3704,8 +3704,7 @@ namespace stream {
     crash::watched_thread_t crash_watch("video-broadcast", 20000);
 
     // stream health: how often the packet queue was cleared as a whole since the last frame (safe::queue_t::raise on a full queue)
-    std::uint64_t seen_queue_clears = packets->clear_count();
-    std::uint64_t seen_queue_dropped = packets->cleared_elements();
+    auto [seen_queue_clears, seen_queue_dropped] = packets->clear_stats();
 
     while (auto packet = packets->pop()) {
       crash::busy_scope_t crash_busy(crash_watch.slot);
@@ -3718,9 +3717,8 @@ namespace stream {
       auto session = (session_t *) packet->channel_data;
       session->last_video_activity_ms.store(steady_now_ms(), std::memory_order_relaxed);
       {
-        const auto clears = packets->clear_count();
+        const auto [clears, dropped] = packets->clear_stats();
         if (clears != seen_queue_clears) {
-          const auto dropped = packets->cleared_elements();
           telemetry::hooks::count(session->launch_session_id, telemetry::hooks::counter_e::queue_flushes, clears - seen_queue_clears);
           telemetry::hooks::count(session->launch_session_id, telemetry::hooks::counter_e::queue_frames_dropped, dropped - seen_queue_dropped);
           seen_queue_clears = clears;
@@ -3938,6 +3936,7 @@ namespace stream {
         const auto presentation_time = packet->frame_timestamp.value_or(ratecontrol_next_frame_start);
         const auto timestamp = video_rtp_timestamp(presentation_time, video_epoch);
 
+        std::size_t frame_sent_packets = 0;  // packets of this frame that reached the socket: a frame that could not be sent is not a sent frame
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
@@ -4065,6 +4064,7 @@ namespace stream {
                   }
                 }
               }
+              frame_sent_packets += sent_packets;
               if (sent_packets != 0) {
                 note_measured_send(session, static_cast<std::uint64_t>(shards.prefixsize + shards.blocksize) * sent_packets);
                 if (!session->first_video_packet_logged.exchange(true)) {
@@ -4109,8 +4109,10 @@ namespace stream {
           if (packet->pipeline_trace && packet->pipeline_trace->packet_ready) {
             telemetry::hooks::sample(session->launch_session_id, telemetry::hooks::metric_e::backlog_ms, ms_between(*packet->pipeline_trace->packet_ready, frame_send_end));
           }
-          telemetry::hooks::count(session->launch_session_id, telemetry::hooks::counter_e::frames_sent);
-          telemetry::hooks::frame_done(session->launch_session_id, std::chrono::duration_cast<std::chrono::nanoseconds>(frame_send_end.time_since_epoch()).count());
+          if (frame_sent_packets != 0) {
+            telemetry::hooks::count(session->launch_session_id, telemetry::hooks::counter_e::frames_sent);
+            telemetry::hooks::frame_done(session->launch_session_id, std::chrono::duration_cast<std::chrono::nanoseconds>(frame_send_end.time_since_epoch()).count());
+          }
         }
       }
       catch (const std::exception &e) {
