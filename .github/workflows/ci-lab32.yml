@@ -1,0 +1,49 @@
+name: ci-lab32
+# Fork-only: sharded parallel cold compile. One runner (base) against N = 2, 3 and 4 shards that fill a compiler cache each,
+# and a final job per N that merges the shard caches (through the cache service or through artifacts), then builds at ~100% hits.
+on:
+  push:
+    branches: ["ci/lab32-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  base:
+    name: base (one runner, cold)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/lab-prep
+      - name: Build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          t0=$(date +%s)
+          ninja -C build
+          echo "BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats
+          cp build/.ninja_log "$GITHUB_WORKSPACE/ninja_log.base"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ninja-log-base
+          path: ninja_log.base
+          compression-level: 1
+  n2:
+    uses: ./.github/workflows/ci-lab32-n.yml
+    with: { count: 2, indices: '[0,1]' }
+  n3:
+    uses: ./.github/workflows/ci-lab32-n.yml
+    with: { count: 3, indices: '[0,1,2]' }
+  n4:
+    uses: ./.github/workflows/ci-lab32-n.yml
+    with: { count: 4, indices: '[0,1,2,3]' }

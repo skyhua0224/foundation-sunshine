@@ -1,0 +1,127 @@
+name: ci-lab32-n
+on:
+  workflow_call:
+    inputs:
+      count: { type: number, required: true }
+      indices: { type: string, required: true }
+      weights_run: { type: string, required: false, default: '' }
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  shard:
+    name: shard ${{ matrix.i }}/${{ inputs.count }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        i: ${{ fromJSON(inputs.indices) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/lab-prep
+      - name: Build this shard's compile outputs
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          set -euo pipefail
+          ninja -C build -t targets all | python scripts/ci/shard-targets.py ${{ matrix.i }} ${{ inputs.count }} > shard.txt
+          echo "shard outputs: $(wc -l < shard.txt)"
+          { echo "ninja_required_version = 1.10"; echo "include build.ninja"; printf 'build lab_shard: phony'; while read -r o; do printf ' %s' "$o"; done < shard.txt; echo; } > build/shard.ninja
+          t0=$(date +%s)
+          ninja -C build -f shard.ninja lab_shard
+          echo "SHARD_BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats
+          du -sh "$CCACHE_DIR" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the compiler cache (cache service)
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}-s${{ matrix.i }}
+      - name: Pack the compiler cache
+        if: always()
+        run: tar -C .ccache -cf ccache-shard.tar .
+      - name: Upload the compiler cache (artifact)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccache-n${{ inputs.count }}-s${{ matrix.i }}
+          path: ccache-shard.tar
+          compression-level: 0
+          retention-days: 1
+  final:
+    name: final (${{ matrix.transport }}) n=${{ inputs.count }}
+    needs: shard
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [cache, artifact]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/lab-prep
+      - name: Restore shard caches (cache service)
+        if: matrix.transport == 'cache'
+        shell: bash
+        run: echo "restoring through actions/cache"
+      - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache'
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}-s0
+      - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache'
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}-s1
+      - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache' && inputs.count > 2
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}-s2
+      - uses: actions/cache/restore@v6
+        if: matrix.transport == 'cache' && inputs.count > 3
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: lab32-${{ github.run_id }}-${{ github.run_attempt }}-n${{ inputs.count }}-s3
+      - uses: actions/download-artifact@v8
+        if: matrix.transport == 'artifact'
+        with:
+          pattern: ccache-n${{ inputs.count }}-s*
+          path: shard-caches
+      - name: Merge the downloaded shard caches
+        if: matrix.transport == 'artifact'
+        run: |
+          mkdir -p .ccache
+          for t in shard-caches/*/ccache-shard.tar; do tar -C .ccache -xf "$t"; done
+      - name: Build at the merged cache
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          du -sh "$CCACHE_DIR"
+          t0=$(date +%s)
+          ninja -C build
+          echo "FINAL_BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats
+      - name: Native tests
+        shell: msys2 {0}
+        run: |
+          t0=$(date +%s)
+          ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600
+          echo "CTEST_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
