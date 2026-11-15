@@ -1,0 +1,89 @@
+name: svc-probe
+on:
+  push:
+    branches: [ci/svc-exit-probe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Keep LF line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.longpaths
+          GIT_CONFIG_VALUE_0: 'true'
+          GIT_CONFIG_KEY_1: submodule.fetchJobs
+          GIT_CONFIG_VALUE_1: '8'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: >-
+            wget
+            curl
+      - name: Dependencies
+        env:
+          opus_version: '1.6.1-1'
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-${opus_version}-any.pkg.tar.zst"
+          wget https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          dependencies=(
+            "git"
+            "mingw-w64-ucrt-x86_64-cmake"
+            "mingw-w64-ucrt-x86_64-lld"
+            "mingw-w64-ucrt-x86_64-ninja"
+            "mingw-w64-ucrt-x86_64-cppwinrt"
+            "mingw-w64-ucrt-x86_64-curl-winssl"
+            "mingw-w64-ucrt-x86_64-MinHook"
+            "mingw-w64-ucrt-x86_64-miniupnpc"
+            "mingw-w64-ucrt-x86_64-nlohmann-json"
+            "mingw-w64-ucrt-x86_64-onevpl"
+            "mingw-w64-ucrt-x86_64-openssl"
+            "mingw-w64-ucrt-x86_64-toolchain"
+            "mingw-w64-ucrt-x86_64-autotools"
+          )
+          pacman -Syu --noconfirm "${dependencies[@]}"
+          pacman --noconfirm -U ${opus_tarball}
+          gcc --version | head -1
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          SUNSHINE_RTX_HDR: 'OFF'
+          BUILD_VERSION: v2026.1114.173055.杂鱼
+        run: |
+          mkdir -p build
+          export PATH="$PATH:/c/Program Files/dotnet"
+          cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_RTX_HDR=OFF -DDRIVER_DEPS_REQUIRED=OFF -DSUNSHINE_ASSETS_DIR=assets
+      - name: Fixed wrapper
+        shell: msys2 {0}
+        run: |
+          ninja -C build sunshinesvc
+          rm -rf build/config
+          set +e
+          build/tools/sunshinesvc.exe
+          echo "FIXED exit code: $?"
+          echo "pending reports after the fixed run:"; ls build/config/crashes/pending 2>&1 || true
+      - name: Wrapper without the fix
+        shell: msys2 {0}
+        run: |
+          sed -i '/^  crash::stop_watchdog();$/d' tools/sunshinesvc.cpp
+          git diff --stat
+          ninja -C build sunshinesvc
+          rm -rf build/config
+          set +e
+          build/tools/sunshinesvc.exe
+          echo "UNFIXED exit code: $?"
+          echo "pending reports after the unfixed run:"; ls build/config/crashes/pending 2>&1 || true
+          for f in build/config/crashes/pending/*.json; do echo "== $f"; cat "$f"; echo; done
+          mkdir -p ../syms && cp build/tools/sunshinesvc.exe ../syms/sunshinesvc.exe
+          for f in build/config/crashes/pending/*.json; do python3 scripts/release/symbolize.py "$f" --symbols ../syms --tool addr2line || true; done
