@@ -1,0 +1,240 @@
+name: ci-lab30
+# Fork-only: speed of the Clang cold build. Debug info and optimisation level, precompiled headers, ccache depend mode,
+# ninja parallelism and Defender exclusions, each measured on one VM per suite with interleaved repeats.
+on:
+  push:
+    branches: ["ci/lab30-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  TU_SUFFIXES: "src/http/server.cpp src/http/client.cpp src/nvhttp.cpp src/confighttp.cpp src/rtsp.cpp src/stream.cpp src/video.cpp src/config.cpp src/audio.cpp src/process.cpp src/crypto.cpp src/network.cpp src/file_mapping/file_mapping_ws_session.cpp src/platform/windows/misc.cpp src/platform/windows/display_vram.cpp src/nvhttp/pairing.cpp src/confighttp/doctor.cpp src/sparxie/runtime.cpp src/telemetry/telemetry.cpp unit/test_crypto.cpp unit/test_confighttp_routes.cpp tools/test_http_safety.cpp src/display_device/settings.cpp src/webhook/webhook.cpp"
+defaults:
+  run:
+    shell: bash
+jobs:
+  suite:
+    name: ${{ matrix.suite }}
+    runs-on: windows-latest
+    timeout-minutes: 175
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [flags, pch, ccache, jobs, defender]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Targeted submodules
+        run: scripts/ci/init-submodules.sh windows
+      - name: Defender exclusions (full set, with the clang processes)
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          "CPU: $($cpu.Name) logical=$($cpu.NumberOfLogicalProcessors) RAM=$([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)) image=$env:ImageVersion"
+          "RealTimeProtection: $((Get-MpComputerStatus).RealTimeProtectionEnabled)"
+          Add-MpPreference -ExclusionPath 'C:\msys64', "$env:GITHUB_WORKSPACE", 'D:\a', $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionProcess 'gcc.exe','g++.exe','cc1.exe','cc1plus.exe','clang.exe','clang++.exe','clang-23.exe','ld.exe','ld.lld.exe','lld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          release: false
+          update: true
+          install: wget
+      - name: Toolchain
+        shell: msys2 {0}
+        run: |
+          opus_tarball="mingw-w64-ucrt-x86_64-opus-1.6.1-1-any.pkg.tar.zst"
+          wget -q https://repo.msys2.org/mingw/ucrt64/${opus_tarball}
+          P=mingw-w64-ucrt-x86_64
+          pacman -S --noconfirm --needed git diffutils $P-ccache $P-cmake $P-ninja $P-gcc $P-clang $P-lld $P-binutils $P-crt-git $P-headers-git $P-winpthreads-git \
+            $P-pkgconf $P-make $P-python $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json $P-libvpl $P-openssl
+          pacman --noconfirm -U ${opus_tarball}
+          clang++ --version | head -2; ccache --version | head -1; ninja --version
+      - name: Configure one build directory per variant
+        shell: msys2 {0}
+        env:
+          BRANCH: ci-lab30
+          BUILD_VERSION: lab.zayu
+          COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SUNSHINE_BUILD_BRANCH: ci-lab30
+          SUNSHINE_BUILD_CHANNEL: dev
+          SUNSHINE_BUILD_BUILDER: ci
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          common=(-G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
+          O() { echo "-DCMAKE_C_FLAGS_RELEASE=$1 -DCMAKE_CXX_FLAGS_RELEASE=$1"; }
+          LAUNCH="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          declare -A V
+          cat > "$GITHUB_WORKSPACE/pch-apply.cmake" <<'CM'
+          set(_alk_hdrs "$ENV{ALK_PCH_HEADERS}")
+          function(_alk_collect dir out)
+            get_property(_t DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+            get_property(_s DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+            foreach(sub IN LISTS _s)
+              _alk_collect("${sub}" _sub)
+              list(APPEND _t ${_sub})
+            endforeach()
+            set(${out} "${_t}" PARENT_SCOPE)
+          endfunction()
+          function(_alk_apply)
+            _alk_collect("${CMAKE_SOURCE_DIR}" targets)
+            foreach(t IN LISTS targets)
+              get_target_property(type ${t} TYPE)
+              get_target_property(sdir ${t} SOURCE_DIR)
+              if(type MATCHES "EXECUTABLE|STATIC_LIBRARY|OBJECT_LIBRARY" AND NOT sdir MATCHES "_deps|third-party|googletest")
+                foreach(h IN LISTS _alk_hdrs)
+                  target_precompile_headers(${t} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${h}>")
+                endforeach()
+              endif()
+            endforeach()
+          endfunction()
+          cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _alk_apply)
+          CM
+          sed -i 's/^          //' "$GITHUB_WORKSPACE/pch-apply.cmake"
+          cat > "$GITHUB_WORKSPACE/lab-pch-win.h" <<'H'
+          #ifndef WIN32_LEAN_AND_MEAN
+          #define WIN32_LEAN_AND_MEAN
+          #endif
+          #ifndef NOMINMAX
+          #define NOMINMAX
+          #endif
+          #include <windows.h>
+          H
+          sed -i 's/^          //' "$GITHUB_WORKSPACE/lab-pch-win.h"
+          STD='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>;<nlohmann/json.hpp>;<boost/log/sources/severity_logger.hpp>;<boost/property_tree/ptree.hpp>'
+          pch() { echo "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/pch-apply.cmake"; }
+          case "${{ matrix.suite }}" in
+            flags)
+              V[base]=""
+              V[O2]="$(O '-O2\ -DNDEBUG')"
+              V[O1]="$(O '-O1\ -DNDEBUG')"
+              V[O3-glt]="$(O '-O3\ -DNDEBUG\ -gline-tables-only')"
+              V[O3-g]="$(O '-O3\ -DNDEBUG\ -g')" ;;
+            pch)
+              V[base]=""
+              V[pch-std]="$(pch)"
+              V[pch-std-inst]="$(pch) -DCMAKE_CXX_FLAGS=-fpch-instantiate-templates"
+              V[pch-win-inst]="$(pch) -DCMAKE_CXX_FLAGS=-fpch-instantiate-templates" ;;
+            ccache)
+              V[base]=""
+              V[cc]="$LAUNCH"
+              V[pchcc]="$LAUNCH $(pch) -DCMAKE_CXX_FLAGS=-fpch-instantiate-templates" ;;
+            jobs|defender)
+              V[base]="" ;;
+          esac
+          : > variants.txt
+          for name in "${!V[@]}"; do
+            echo "== configure $name"
+            case "$name" in
+              pch-std|pch-std-inst|pchcc) export ALK_PCH_HEADERS="$STD" ;;
+              pch-win-inst) export ALK_PCH_HEADERS="$GITHUB_WORKSPACE/lab-pch-win.h;$STD" ;;
+            esac
+            if eval cmake -B "build-$name" "${common[@]}" ${V[$name]} > "configure-$name.log" 2>&1; then echo "$name" >> variants.txt; else echo "configure FAILED for $name"; tail -6 "configure-$name.log"; fi
+          done
+          sort variants.txt -o variants.txt; echo "variants: $(tr '\n' ' ' < variants.txt)"
+      - name: Pick the translation units and warm up
+        shell: msys2 {0}
+        run: |
+          first=base
+          ninja -C "build-$first" -t targets all > targets.txt
+          : > tus.txt
+          for s in $TU_SUFFIXES; do
+            line=$(grep -E "(^|/)${s//./\\.}\.obj:" targets.txt | grep -v "dir/__/" | head -1 | cut -d: -f1)
+            [ -n "$line" ] && echo "$line" >> tus.txt || echo "no object for $s"
+          done
+          wc -l tus.txt
+          echo "--- compile command of one object (base):"
+          ninja -C build-base -t commands "$(sed -n 5p tus.txt)" | tail -1 | head -c 1800; echo
+          for v in $(cat variants.txt); do
+            ninja -C "build-$v" -k 0 $(cat tus.txt) > "warm-$v.log" 2>&1 || echo "warm-up failures in $v: $(grep -c '^FAILED' warm-$v.log)"
+          done
+          for v in $(cat variants.txt); do
+            d=0; for o in $(cat tus.txt); do [ -f "build-$v/$o" ] || d=$((d+1)); done
+            echo "$v: $d of $(wc -l < tus.txt) objects missing after warm-up"
+          done
+      - name: Timed passes (3 interleaved repeats)
+        shell: msys2 {0}
+        run: |
+          export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=4G CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          pw() { /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "$1" ; }
+          measure() {  # name builddir r [ninja args...]
+            local name=$1 dir=$2 r=$3; shift 3
+            for o in $(cat tus.txt); do rm -f "$dir/$o"; done
+            find "$dir" -name 'cmake_pch*' -delete 2>/dev/null || true
+            s=$(date +%s.%N)
+            ninja -C "$dir" -k 0 "$@" $(cat tus.txt) > "run-$name-$r.log" 2>&1 || true
+            e=$(date +%s.%N)
+            echo "RESULT $name $r $(python3 -c "print(round($e-$s,1))") failed=$(grep -c '^FAILED' run-$name-$r.log)"
+          }
+          for r in 1 2 3; do
+            case "${{ matrix.suite }}" in
+              flags|pch)
+                for v in $(cat variants.txt); do measure "$v" "build-$v" $r -j4; done ;;
+              ccache)
+                rm -rf cc-d1 cc-d2 cc-d3 cc-d4
+                measure nocache build-base $r -j4
+                ( export CCACHE_DIR=$PWD/cc-d1; measure cc-direct-cold build-cc $r -j4 )
+                ( export CCACHE_DEPEND=1 CCACHE_DIR=$PWD/cc-d2; measure cc-depend-cold build-cc $r -j4 )
+                ( export CCACHE_DIR=$PWD/cc-d1; measure cc-direct-hit build-cc $r -j4 )
+                ( export CCACHE_DEPEND=1 CCACHE_DIR=$PWD/cc-d2; measure cc-depend-hit build-cc $r -j4 )
+                ( export CCACHE_SLOPPINESS=pch_defines,time_macros CCACHE_DIR=$PWD/cc-d3; measure pchcc-sloppy-cold build-pchcc $r -j4 )
+                ( export CCACHE_SLOPPINESS=pch_defines,time_macros CCACHE_DIR=$PWD/cc-d3; measure pchcc-sloppy-hit build-pchcc $r -j4 )
+                CCACHE_SLOPPINESS=pch_defines,time_macros CCACHE_DIR=$PWD/cc-d3 ccache -s | grep -iE "hits|misses|uncacheable" | sed "s/^/STATS sloppy r$r: /"
+                ( export CCACHE_DIR=$PWD/cc-d4; measure pchcc-strict-cold build-pchcc $r -j4 )
+                ( export CCACHE_DIR=$PWD/cc-d4; measure pchcc-strict-hit build-pchcc $r -j4 )
+                CCACHE_DIR=$PWD/cc-d4 ccache -s | grep -iE "hits|misses|uncacheable" | sed "s/^/STATS strict r$r: /" ;;
+              jobs)
+                ( while true; do pw "[int](Get-Counter '\\Memory\\Available MBytes').CounterSamples.CookedValue" | tr -d '\r' | sed "s/^/MEM /" >> mem.txt; sleep 8; done ) &
+                sampler=$!
+                for j in 3 4 5 6 8; do echo "MARK j$j $(date +%s)" >> mem.txt; measure "j$j" build-base $r -j$j; done
+                kill $sampler 2>/dev/null || true ;;
+              defender)
+                full_p="'gcc.exe','g++.exe','cc1.exe','cc1plus.exe','clang.exe','clang++.exe','clang-23.exe','ld.exe','ld.lld.exe','lld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe'"
+                cur_p="'gcc.exe','g++.exe','cc1.exe','cc1plus.exe','as.exe','ld.exe','ninja.exe','ccache.exe','cmake.exe','pacman.exe','bash.exe','git.exe','iscc.exe'"
+                clear_all() { pw "Remove-MpPreference -ExclusionPath (Get-MpPreference).ExclusionPath; Remove-MpPreference -ExclusionProcess (Get-MpPreference).ExclusionProcess" >/dev/null; }
+                paths="'C:\\msys64','D:\\a'"
+                clear_all; pw "Add-MpPreference -ExclusionPath $paths; Add-MpPreference -ExclusionProcess $full_p" >/dev/null; measure def-full build-base $r -j4
+                clear_all; pw "Add-MpPreference -ExclusionPath $paths; Add-MpPreference -ExclusionProcess $cur_p" >/dev/null; measure def-current build-base $r -j4
+                clear_all; measure def-none build-base $r -j4
+                clear_all; pw "Add-MpPreference -ExclusionPath $paths; Add-MpPreference -ExclusionProcess $full_p" >/dev/null ;;
+            esac
+          done | tee results.txt
+          python3 - <<'PY'
+          import collections, statistics
+          t = collections.defaultdict(list); bad = collections.defaultdict(int); order=[]
+          for line in open("results.txt"):
+              p = line.split()
+              if len(p) >= 5 and p[0] == "RESULT":
+                  if p[1] not in t: order.append(p[1])
+                  t[p[1]].append(float(p[3])); bad[p[1]] += int(p[4].split("=")[1])
+          ref = "base" if "base" in t else ("nocache" if "nocache" in t else order[0])
+          base = statistics.median(t[ref])
+          print("variant, runs, median s, min s, max s, vs", ref, ", failed edges")
+          for v in order:
+              m = statistics.median(t[v])
+              print(f"{v:18s} {len(t[v])} {m:8.1f} {min(t[v]):8.1f} {max(t[v]):8.1f} {m/base:.2f}x {bad[v]}")
+          PY
+          if [ -f mem.txt ]; then python3 - <<'PY'
+          cur=None; low={}
+          for line in open("mem.txt"):
+              p=line.split()
+              if p and p[0]=="MARK": cur=p[1]
+              elif p and p[0]=="MEM" and cur and len(p)>1:
+                  v=float(p[1]); low[cur]=min(low.get(cur,1e9),v)
+          print("lowest available MB per -j:", low)
+          PY
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lab30-${{ matrix.suite }}
+          path: |
+            results.txt
+            mem.txt
+            run-*.log
+            warm-*.log
+            configure-*.log
+          compression-level: 6
