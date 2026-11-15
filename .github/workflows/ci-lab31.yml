@@ -94,6 +94,11 @@ jobs:
           scripts/ci/xc/build.sh "$RUNNER_TEMP/xc" "$GITHUB_WORKSPACE/build" > xc-build.log 2>&1 || { tail -60 xc-build.log; grep -E "^FAILED|error:" xc-build.log | head -20; exit 1; }
           echo "XC_TOTAL_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -E "^\[time\]" xc-build.log | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Tests that need no Windows (CMake scripts, configuration checks)
+        run: |
+          cd build
+          ctest -j4 -R 'rc_version_encoding|build_info_archive|controller_handoff_probe|cmake_configuration_tests' --output-on-failure --timeout 600 2>&1 | tail -15
+        continue-on-error: true
       - name: Pack the binaries
         run: |
           t0=$(date +%s)
@@ -152,6 +157,10 @@ jobs:
           find build -name CTestTestfile.cmake -print0 | xargs -0 sed -i "s#/__w/foundation-sunshine/foundation-sunshine#${ws}#g"
           echo "UNPACK_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -m3 -h "add_test" build/tests/CTestTestfile.cmake | cut -c1-200
+      # The test executables carry the absolute path of the Linux checkout (/__w/<repo>/<repo>); a junction makes it resolve to this one.
+      - name: Make the Linux workspace path resolve
+        shell: cmd
+        run: mklink /J D:\__w D:\a
       - name: Native tests (no MSYS2 on the PATH)
         shell: cmd
         run: |
@@ -159,6 +168,10 @@ jobs:
           echo exit=%ERRORLEVEL%
           type ctest-native.log | findstr /R /C:"tests passed" /C:"Failed" /C:"Not Run" /C:"Test #"
         continue-on-error: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ctest-native-log
+          path: ctest-native.log
       - name: Summary of the test run
         run: |
           tail -15 ctest-native.log | tee -a "$GITHUB_STEP_SUMMARY"
