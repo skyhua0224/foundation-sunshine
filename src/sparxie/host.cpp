@@ -1618,8 +1618,13 @@ namespace sparxie {
         if (app.contains("sparxie") && app["sparxie"].is_object()) installs.push_back(app["sparxie"].value("install", std::string()));
       std::sort(installs.begin(), installs.end());
       installs.erase(std::unique(installs.begin(), installs.end()), installs.end());
-      for (const auto &install_id : installs)
-        if (!install_id.empty() && (drop_blank_hero(env, apps, install_id) | drop_blank_badged_cover(env, apps, install_id))) ++attached;
+      for (const auto &install_id : installs) {
+        if (install_id.empty()) continue;
+        // Both repairs always run, so the hero and the cover are each checked.
+        const bool dropped_hero = drop_blank_hero(env, apps, install_id);
+        const bool dropped_cover = drop_blank_badged_cover(env, apps, install_id);
+        if (dropped_hero || dropped_cover) ++attached;
+      }
     }
     std::vector<std::string> badged_installs;
     for (auto &app : apps["apps"]) {

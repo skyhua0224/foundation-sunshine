@@ -179,7 +179,6 @@ namespace telemetry {
     int failures_ = 0;
     std::deque<std::int64_t> post_times_;  // when the last requests went out (sender thread only)
     std::int64_t last_flush_ms_ = 0;
-    std::int64_t last_log_flush_ms_ = 0;
   };
 
   /** A new random UUID v4 (text form). */

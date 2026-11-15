@@ -9,7 +9,7 @@ list(APPEND SUNSHINE_COMPILE_OPTIONS -Wno-misleading-indentation)
 
 # gcc15 complains about non-template type 'coroutine_handle' used as a template in Windows.Foundation.h
 # can remove after https://gcc.gnu.org/bugzilla/show_bug.cgi?id=120495 is available in mingw-w64
-list(APPEND SUNSHINE_COMPILE_OPTIONS -Wno-template-body)
+# -Wno-template-body is a GCC option (clang reports it as unknown); the GNU >= 15 block below adds it.
 
 # Template-heavy translation units (confighttp.cpp in particular) exceed the
 # 32767-section COFF limit. Without big-obj the assembler silently writes a
