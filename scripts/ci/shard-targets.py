@@ -39,7 +39,8 @@ def main():
                 mine.append(p)
     else:
         mine = outputs[index::count]
-    print("\n".join(mine))
+    # Binary write: a text-mode print would end the lines with CRLF on Windows, which ninja reads as part of the name.
+    sys.stdout.buffer.write(("\n".join(mine) + "\n").encode())
 
 
 main()
