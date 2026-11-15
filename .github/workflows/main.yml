@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - master
+      - ci/fp-hot
   schedule:
     # Nightly: a cold build with the latest toolchain packages, the full native tests, and a fresh compiler cache for master.
     - cron: '17 20 * * *'
