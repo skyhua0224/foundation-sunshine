@@ -478,8 +478,9 @@ jobs:
           echo "shards=$indices" >> "$GITHUB_OUTPUT"
           echo "sharded cold build: $sharded ${reason:+($reason)}" | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # One shard of a cold compile: configures exactly like build_win, builds its share of the object files (scripts/ci/shard-targets.py
-  # splits them by the weight of an earlier build, so a runner is not handed all the slow ones) and uploads its compiler cache.
+  # One shard of a cold compile: configures exactly like build_win, builds chunks of object files until none is left
+  # (scripts/ci/shard-compile.sh; scripts/ci/shard-targets.py cuts them into equal weights from an earlier build) and uploads its
+  # compiler cache.
   # build_win then merges the caches and runs the whole build at ~100% hits. The MAT capture package and the dotnet publish
   # are left out: they only order before the objects and change no object command line, but every shard would run them.
   shard:
@@ -487,7 +488,7 @@ jobs:
     needs: [changes, setup_release, cold_plan]
     if: needs.cold_plan.outputs.sharded == 'true'
     permissions:
-      contents: read
+      contents: write  # refs/claims/<run>/<chunk>: creating a ref is the atomic "this runner builds this chunk" (shard-compile.sh)
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -554,34 +555,21 @@ jobs:
             -DSUNSHINE_PUBLISHER_WEBSITE='https://github.com/AlkaidLab/foundation-sunshine' \
             -DSUNSHINE_PUBLISHER_ISSUE_URL='https://github.com/AlkaidLab/foundation-sunshine/issues'
 
-      - name: Compile this shard's object files
+      # Chunks of object files are handed out one at a time, so a runner on a slower CPU simply builds fewer of them (the CPU of a
+      # hosted runner varies from one job to the next by up to 2x on the same work). The token is only read by this script, which
+      # removes it from the environment of ninja.
+      - name: Compile object files, chunk by chunk
         shell: msys2 {0}
         env:
           CCACHE_DIR: ${{ github.workspace }}\.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
-        run: |
-          set -euo pipefail
-          # `ninja -t commands` lists what the default target runs; `ninja -n` cannot be used, a fresh build directory stops it
-          # at the pending CMake re-run.
-          ninja -C build -t commands | python scripts/ci/shard-targets.py ${{ matrix.index }} ${{ strategy.job-total }} scripts/ci/shard-weights.ninja_log > shard.txt
-          echo "this shard compiles $(wc -l < shard.txt) object files"
-          # A wrapper build file with one phony target over this shard's objects (ninja takes no target list from a file, and
-          # the command line would be too long). Names are escaped for ninja syntax.
-          {
-            echo "ninja_required_version = 1.10"
-            echo "include build.ninja"
-            printf 'build ci_shard: phony'
-            while read -r object; do
-              object=${object%$'\r'}
-              object=${object//\$/\$\$}; object=${object// /\$ }; object=${object//:/\$:}
-              printf ' %s' "$object"
-            done < shard.txt
-            echo
-          } > build/shard.ninja
-          ninja -C build -f shard.ninja ci_shard
-          cp build/.ninja_log ninja_log.shard
-          ccache --show-stats
+          CLAIM_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: scripts/ci/shard-compile.sh ${{ matrix.index }} ${{ strategy.job-total }}
 
       # The cache is a few MB per shard: ccache already compresses its entries, so the artifact is stored as one tar without further compression.
       - name: Pack the compiler cache
@@ -606,11 +594,176 @@ jobs:
           compression-level: 1
           retention-days: 14
 
+  # The claim refs only matter while the shards run.
+  shard_cleanup:
+    name: Remove the shard claims
+    needs: shard
+    if: ${{ always() && needs.shard.result != 'skipped' }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Delete refs/claims/${{ github.run_id }}-*
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/claims/${GITHUB_RUN_ID}-" --jq '.[].ref' \
+            | while read -r ref; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/${ref}" || true; done
+
+  # Pull requests without the NVIDIA SDK secrets never compile the adapter branches that master builds. This configures the
+  # same definitions with placeholder digests and runs the tests that load fake adapters, so a build-graph change that
+  # leaks the definitions into them fails here instead of on master. It is a build of its own: running beside the main build
+  # instead of after it takes about 2.5 minutes off the Windows job.
+  adapter_config:
+    name: Adapter build configuration (no SDK)
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    steps:
+      - name: Keep LF line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Submodules
+        shell: bash
+        run: scripts/ci/init-submodules.sh windows
+
+      - name: Toolchain
+        uses: ./.github/actions/windows-toolchain
+
+      - name: Cache compiler objects
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-windows-adapter-${{ github.run_id }}
+          restore-keys: |
+            ccache-windows-
+
+      - name: Fetch pinned installer inputs
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $dest = "$env:RUNNER_TEMP/installer-inputs/pinned"
+          ./scripts/fetch-installer-inputs.ps1 -Destination $dest
+          "GUI_BUNDLE_DIR=$dest/gui" >> $env:GITHUB_ENV
+
+      - name: Test the adapter build configuration without the SDK
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          export PATH="$PATH:/c/Program Files/dotnet"
+          gui_options=()
+          if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
+            gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
+          fi
+          cmake -B build-adapter-config -G Ninja -S . "${gui_options[@]}" \
+            -DBUILD_DOCS=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_RTX_HDR=OFF -DSUNSHINE_SIMULATE_ADAPTER_DEFINES=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+          cmake --build build-adapter-config --target pre_encode_filter_unit_tests truehdr_adapter_loader_unit_tests
+          ctest --test-dir build-adapter-config --no-tests=error --output-on-failure \
+            -R '^(pre_encode_filter_unit_tests|truehdr_adapter_loader_unit_tests)$'
+
+  # The installer's setup UI (foundation-setup-ui.exe), built beside the compile instead of in front of the packaging.
+  setup_ui:
+    name: Installer setup UI
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    steps:
+      - name: Keep LF line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Submodules
+        shell: bash
+        run: scripts/ci/init-submodules.sh windows-package
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Fetch foundation-ui
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sha = (Get-Content scripts/ci/foundation-ui.sha -Raw).Trim()
+          $dir = "$env:GITHUB_WORKSPACE/../ds5-ui-m3e"
+          git init -q $dir
+          git -C $dir fetch -q --depth 1 https://github.com/AlkaidLab/foundation-ui $sha
+          git -C $dir -c advice.detachedHead=false checkout -q FETCH_HEAD
+          npm ci --prefix $dir
+
+      # The installer's setup UI (foundation-setup-ui.exe). The Panel repository builds and attests one per commit; the pin in
+      # scripts/installer-inputs.json (setupUi) is downloaded and checked (sha256 and `gh attestation verify`), under 10 s.
+      # Without a matching asset (no pin, a pin older than the committed Panel submodule or scripts/ci/foundation-ui.sha, a failed
+      # download) or when a manual run asks for it, it is built from the committed Panel submodule instead (pages from
+      # foundation-ui and the Tauri window, about 3.5 min; scripts/build-setup-ui.ps1, docs/installer-webui.md). A file that fails
+      # verification is an error, never a reason to build.
+      - name: Installer setup UI
+        if: needs.changes.outputs.package == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: ${{ inputs.build_setup_ui_from_submodule }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: Upload the setup UI
+        uses: actions/upload-artifact@v7
+        with:
+          name: foundation-setup-ui
+          path: ${{ runner.temp }}/installer-inputs/foundation-setup-ui.exe
+          retention-days: 1
+
   build_win:
     name: Windows
-    needs: [changes, setup_release, cold_plan, shard]
+    needs: [changes, setup_release, cold_plan, shard, setup_ui]
     # `shard` is skipped on the warm path; a skipped dependency would skip this job too without the explicit status checks.
-    if: ${{ !cancelled() && needs.changes.outputs.build == 'true' && needs.setup_release.result == 'success' && needs.cold_plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.shard.result) }}
+    if: ${{ !cancelled() && needs.changes.outputs.build == 'true' && needs.setup_release.result == 'success' && needs.cold_plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.shard.result) && contains(fromJSON('["success","skipped"]'), needs.setup_ui.result) }}
     permissions:
       contents: read
       actions: write  # prune stale ccache entries after saving this run's
@@ -705,40 +858,18 @@ jobs:
           $env:SUNSHINE_ASSETS_DIR = "${{ github.workspace }}\build"
           npm run build
 
-      # The installer's setup UI (foundation-setup-ui.exe). The Panel repository builds and attests one per commit; the pin in
-      # scripts/installer-inputs.json (setupUi) is downloaded and checked (sha256 and `gh attestation verify`), under 10 s.
-      # Without a matching asset (no pin, a pin older than the committed Panel submodule or scripts/ci/foundation-ui.sha, a failed
-      # download) or when a manual run asks for it, it is built from the committed Panel submodule instead (pages from
-      # foundation-ui and the Tauri window, about 3.5 min; scripts/build-setup-ui.ps1, docs/installer-webui.md). A file that fails
-      # verification is an error, never a reason to build.
+      # The installer's setup UI is built by the setup_ui job (beside the compile) and downloaded here.
       - name: Installer setup UI
         if: needs.changes.outputs.package == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: foundation-setup-ui
+          path: ${{ runner.temp }}/installer-inputs
+
+      - name: Point the packaging at the setup UI
+        if: needs.changes.outputs.package == 'true'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_FROM_SUBMODULE: ${{ inputs.build_setup_ui_from_submodule }}
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
-          $clock = [Diagnostics.Stopwatch]::StartNew()
-          $source = 'built from the Panel submodule'
-          $fetched = $false
-          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
-            Write-Output 'A manual run asked for the source build.'
-          } else {
-            ./scripts/fetch-setup-ui.ps1 -Output $out
-            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
-            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
-          }
-          if (-not $fetched) {
-            ./scripts/build-setup-ui.ps1 `
-              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
-              -Output $out
-          }
-          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
-          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
-          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
-          Write-Output "installer setup UI $source in $seconds s"
+        run: '"SETUP_UI_EXE=$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe" >> $env:GITHUB_ENV'
 
       - name: Cache compiler objects
         # The nightly build starts cold on purpose: it proves that a build from nothing still works with today's packages,
@@ -888,31 +1019,6 @@ jobs:
       - name: Run native tests
         shell: msys2 {0}
         run: ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml"
-
-      # Pull requests without the NVIDIA SDK secrets never compile the adapter branches that master builds. This configures the
-      # same definitions with placeholder digests and runs the tests that load fake adapters, so a build-graph change that
-      # leaks the definitions into them fails here instead of on master.
-      - name: Test the adapter build configuration without the SDK
-        if: ${{ !cancelled() && steps.configure_windows.conclusion == 'success' }}
-        shell: msys2 {0}
-        env:
-          CCACHE_DIR: ${{ github.workspace }}\.ccache
-          CCACHE_MAXSIZE: 2G
-          CCACHE_COMPILERCHECK: content
-        run: |
-          export PATH="$PATH:/c/Program Files/dotnet"
-          gui_options=()
-          if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
-            gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
-          fi
-          cmake -B build-adapter-config -G Ninja -S . "${gui_options[@]}" \
-            -DBUILD_DOCS=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
-            -DSUNSHINE_RTX_HDR=OFF -DSUNSHINE_SIMULATE_ADAPTER_DEFINES=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
-          cmake --build build-adapter-config --target pre_encode_filter_unit_tests truehdr_adapter_loader_unit_tests
-          ctest --test-dir build-adapter-config --no-tests=error --output-on-failure \
-            -R '^(pre_encode_filter_unit_tests|truehdr_adapter_loader_unit_tests)$'
 
       # Annotations and a job summary from the JUnit file; fails when no test ran, when fewer than --min-tests ran (a
       # registered suite that disappeared) and when a test not listed in scripts/ci/allowed-skips.txt was skipped.
@@ -1216,7 +1322,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [changes, docs-check, workflow-lint, webui, webui-docs, setup_release, vdd_smoke, mat_smoke, cold_plan, shard, build_win, publish]
+    needs: [changes, docs-check, workflow-lint, webui, webui-docs, setup_release, vdd_smoke, mat_smoke, cold_plan, shard, adapter_config, setup_ui, build_win, publish]
     runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}

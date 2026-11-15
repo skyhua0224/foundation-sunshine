@@ -54,16 +54,25 @@
 （`cold_plan` 作业用 `actions/caches` 接口查默认分支和当前引用），`shard` 作业先把编译拆到 8 个运行器上；
 有缓存可恢复的运行（热路径）不启动它们，耗时与之前相同。
 
-流程：每个分片按与 `Configure Windows` 相同的参数配置，只编译自己那一份目标文件（`scripts/ci/shard-targets.py` 按
-`scripts/ci/shard-weights.ninja_log` 里的耗时权重分配，保证每个目标文件恰好落在一个分片），把 ccache 目录（每份只有十几 MB）作为工件上传；
-`build_win` 下载全部分片缓存解到同一个目录（ccache 条目按内容寻址，合并就是拷贝），然后照常 `ninja`，此时编译约 100% 命中，
-再链接、测试、打包。合并之后 `build_win` 只统计这一步的缓存查询，未命中超过 5% 时发出警告，提示分片的配置与 `Configure Windows` 已经不一致。
+流程：每个分片按与 `Configure Windows` 相同的参数配置，然后一块一块地领取目标文件：`scripts/ci/shard-targets.py` 按
+`scripts/ci/shard-weights.ninja_log` 里的耗时把目标文件切成 32 块等重的块（最重的先领），运行器通过创建 git 引用
+`refs/claims/<run>-<attempt>/<块号>` 领块（引用已存在时创建返回 422，所以每块只会被一个运行器领到），领到就编译，直到没有块可领。
+hosted runner 的 CPU 型号不统一，同样的工作在慢机器上要多花近一倍时间；按块领取让慢机器自然少编几块，
+各分片的结束时间因此接近，不需要事先猜谁快。令牌只有 `scripts/ci/shard-compile.sh` 读取，启动 ninja 前已从环境里删除；
+来自 fork 的 pull request 令牌只读，创建引用返回 403，脚本退回固定的蛇形切分（第 k 块给第 k mod N 个运行器，隔一轮反向）。
+某个运行器中途挂掉导致一块没人编译，只会让 `build_win` 多编这一块，不会出错。`shard_cleanup` 作业在分片结束后删掉这些引用。
+每个分片把 ccache 目录（十几 MB）作为工件上传；`build_win` 下载全部分片缓存解到同一个目录（ccache 条目按内容寻址，合并就是拷贝），
+然后照常 `ninja`，此时编译约 100% 命中，再链接、测试、打包。合并之后 `build_win` 只统计这一步的缓存查询，
+未命中超过 5% 时发出警告，提示分片的配置与 `Configure Windows` 已经不一致。
+
+与分片并行的两个作业把原来排在 `build_win` 里的步骤挪了出来：`setup_ui`（安装器 setup UI；上游用固定的下载件时不到 10 秒，
+没有匹配的下载件时要从 Panel 子模块构建约 3.5 分钟）和 `adapter_config`（不带 SDK 的适配器配置测试，约 2.5 分钟）。
 
 - 分片不构建 MAT 采集包和 dotnet 发布（`-DSUNSHINE_BUILD_MAT_CAPTURE=OFF`）：它们只是目标文件的前置依赖，不改变任何一条编译命令，
   但每个分片都会各跑一遍（各约 50–70 秒）。
-- 分片数 `SHARDS: 8` 写在 `cold_plan` 作业里。公开仓库免费计划同时最多 20 个作业
+- 分片数 `SHARDS: 8` 和块数 `SHARD_CHUNKS`（默认 32）写在 `cold_plan` 作业里。公开仓库免费计划同时最多 20 个作业
   （源 `github-docs-actions-limits-20261115`），一次分片构建占 8 个。
-- 权重文件过期只会让切分变得不均匀，不会出错；分片的 `.ninja_log` 作为工件 `ninja-log-shard-*` 保留 14 天，
+- 权重文件过期只会让块变得不等重，不会出错；分片的 `.ninja_log` 作为工件 `ninja-log-shard-*` 保留 14 天，
   `scripts/ci/merge-shard-weights.py` 把一次运行的日志合成新的权重文件。
 - 同一提交的实测（fork，`windows-latest` 冷缓存，端到端墙钟，含各作业 2.5–3.5 分钟的检出、工具链和 configure）：
 
