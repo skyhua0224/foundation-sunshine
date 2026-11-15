@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [flags, pch, ccache, jobs, defender]
+        suite: [pch, ccache, jobs]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +64,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -u
+          W=$(cygpath -m "$GITHUB_WORKSPACE")
           common=(-G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
           O() { echo "-DCMAKE_C_FLAGS_RELEASE=$1 -DCMAKE_CXX_FLAGS_RELEASE=$1"; }
           LAUNCH="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
@@ -105,7 +106,7 @@ jobs:
           H
           sed -i 's/^          //' "$GITHUB_WORKSPACE/lab-pch-win.h"
           STD='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>;<nlohmann/json.hpp>;<boost/log/sources/severity_logger.hpp>;<boost/property_tree/ptree.hpp>'
-          pch() { echo "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/pch-apply.cmake"; }
+          pch() { echo "-DCMAKE_PROJECT_INCLUDE=$W/pch-apply.cmake"; }
           case "${{ matrix.suite }}" in
             flags)
               V[base]=""
@@ -130,7 +131,7 @@ jobs:
             echo "== configure $name"
             case "$name" in
               pch-std|pch-std-inst|pchcc) export ALK_PCH_HEADERS="$STD" ;;
-              pch-win-inst) export ALK_PCH_HEADERS="$GITHUB_WORKSPACE/lab-pch-win.h;$STD" ;;
+              pch-win-inst) export ALK_PCH_HEADERS="$W/lab-pch-win.h;$STD" ;;
             esac
             if eval cmake -B "build-$name" "${common[@]}" ${V[$name]} > "configure-$name.log" 2>&1; then echo "$name" >> variants.txt; else echo "configure FAILED for $name"; tail -6 "configure-$name.log"; fi
           done
@@ -158,7 +159,8 @@ jobs:
       - name: Timed passes (3 interleaved repeats)
         shell: msys2 {0}
         run: |
-          export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=4G CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          set +e
+          export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=4G CCACHE_BASEDIR="$(cygpath -m "$GITHUB_WORKSPACE")"
           pw() { /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "$1" ; }
           measure() {  # name builddir r [ninja args...]
             local name=$1 dir=$2 r=$3; shift 3
