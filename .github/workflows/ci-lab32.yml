@@ -38,12 +38,12 @@ jobs:
           name: ninja-log-base
           path: ninja_log.base
           compression-level: 1
-  n2:
+  n4h:
     uses: ./.github/workflows/ci-lab32-n.yml
-    with: { count: 2, indices: '[0,1]' }
-  n3:
+    with: { count: 4, indices: '[0,1,2,3]', weights: false }
+  n4w:
     uses: ./.github/workflows/ci-lab32-n.yml
-    with: { count: 3, indices: '[0,1,2]' }
-  n4:
+    with: { count: 4, indices: '[0,1,2,3]', weights: true }
+  n6w:
     uses: ./.github/workflows/ci-lab32-n.yml
-    with: { count: 4, indices: '[0,1,2,3]' }
+    with: { count: 6, indices: '[0,1,2,3,4,5]', weights: true }

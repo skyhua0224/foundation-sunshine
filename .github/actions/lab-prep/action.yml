@@ -5,7 +5,9 @@ runs:
   steps:
     - name: Keep LF line endings
       shell: bash
-      run: git config --global core.autocrlf false
+      run: |
+        git config --global core.autocrlf false
+        echo "RUNNER_CPU=$(powershell -NoProfile -Command '(Get-CimInstance Win32_Processor | Select-Object -First 1).Name')"
     - name: Submodules
       shell: bash
       run: scripts/ci/init-submodules.sh windows
