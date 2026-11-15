@@ -37,6 +37,14 @@ on:
         description: 'Build the installer setup UI from the Panel submodule instead of downloading the Panel repository build'
         type: boolean
         default: false
+      cache_scope:
+        description: 'Lab: separate compiler-cache lineage; a fresh value gives a cold build'
+        type: string
+        default: ''
+      lab_touch:
+        description: 'Lab: add one comment line to a source file before building (warm rebuild measurement)'
+        type: boolean
+        default: false
       toolchain:
         description: 'Compiler of the Windows build (clang is the default; gcc stays available as the fallback)'
         type: choice
@@ -60,7 +68,7 @@ permissions:
 # Only a newer push to the same pull request supersedes a running check. Every push to master has its own group and always
 # finishes: a later documentation-only push builds nothing, so it must not cancel the build that publishes the commit before.
 concurrency:
-  group: '${{ github.workflow }}-${{ github.event_name == ''push'' && github.sha || github.ref }}'
+  group: '${{ github.workflow }}-${{ inputs.cache_scope }}-${{ github.event_name == ''push'' && github.sha || github.ref }}'
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The pinned LizardByte release action still composes a Node.js 20 action.
@@ -572,6 +580,12 @@ jobs:
           "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
           Write-Output "installer setup UI $source in $seconds s"
 
+      - name: Lab one-line change
+        if: inputs.lab_touch
+        shell: bash
+        run: |
+          sed -i '1i // lab one-line change for the warm rebuild measurement' src/sparxie/runtime.cpp
+
       - name: Cache compiler objects
         # The nightly build starts cold on purpose: it proves that a build from nothing still works with today's packages,
         # and the cache it saves replaces master's, which would otherwise only ever be topped up.
@@ -586,9 +600,9 @@ jobs:
           # still consume the shared cache quota, and when that quota fills
           # (10 GB, LRU), eviction wiped the whole lineage once and forced a
           # full 47-minute cold rebuild.
-          key: ccache-windows-${{ env.TOOLCHAIN }}-${{ github.run_id }}
+          key: ccache-lab-${{ inputs.cache_scope }}-${{ github.run_id }}
           restore-keys: |
-            ccache-windows-${{ env.TOOLCHAIN }}-
+            ccache-lab-${{ inputs.cache_scope }}-
 
       # The Panel bundle and the WebView2 bootstrapper, pinned by tag/sha256 in scripts/installer-inputs.json and verified (never
       # "latest"). The pinned Panel commit must be the committed submodule. A manual run with gui_run_id replaces the GUI below.
@@ -702,6 +716,22 @@ jobs:
           ninja -C build
           ccache --show-stats --verbose
 
+      - name: Lab measurements
+        shell: msys2 {0}
+        run: |
+          set -u
+          echo "### Lab ${TOOLCHAIN}"
+          (cd build && find . -maxdepth 2 \( -name '*.dll' -o -name '*.exe' \) -printf 'SIZE %s %p\n' | sort -k3) | sed -n 1,12p
+          echo "NM symbols in sunshine.exe: $(nm build/sunshine.exe 2>/dev/null | wc -l)"
+          echo "slowest edges (ms):"
+          awk 'NR>1 {print ($2-$1), $4}' build/.ninja_log | sort -rn | sed -n 1,12p
+          echo "edge time totals (s): all $(awk 'NR>1{s+=$2-$1} END{print s/1000}' build/.ninja_log)  link $(awk 'NR>1 && $4 ~ /\.(exe|dll)$/{s+=$2-$1} END{print s/1000}' build/.ninja_log)  pch $(awk 'NR>1 && $4 ~ /\.pch$/{s+=$2-$1} END{print s/1000}' build/.ninja_log)"
+          cc=gcc; if [[ "$TOOLCHAIN" == clang ]]; then cc="clang -fuse-ld=lld"; fi
+          objs=$(find build -path '*nanors*' -name '*.obj')
+          $cc -O2 -Ithird-party/nanors tests/lab/fec_bench.c $objs -o fec_bench.exe && for i in 1 2 3; do ./fec_bench.exe; done
+          echo "http_safety repeated:"
+          ctest --test-dir build -R http_safety --repeat until-fail:10 --timeout 600 2>&1 | tail -4
+
       - name: Run native tests
         shell: msys2 {0}
         run: ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml"
@@ -761,7 +791,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}\.ccache
-          key: ccache-windows-${{ env.TOOLCHAIN }}-${{ github.run_id }}
+          key: ccache-lab-${{ inputs.cache_scope }}-${{ github.run_id }}
 
       - name: Prune stale compiler cache entries
         # Collapse the cache to exactly one entry (the newest one saved).
