@@ -38,6 +38,10 @@ on:
         description: 'Lab: separate compiler-cache lineage; a fresh value gives a cold build'
         type: string
         default: ''
+      lab_touch:
+        description: 'Lab: add one comment line to a source file before building (warm rebuild measurement)'
+        type: boolean
+        default: false
       toolchain:
         description: 'Compiler of the Windows build (official master always uses gcc)'
         type: choice
@@ -540,6 +544,12 @@ jobs:
           "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
           Write-Output "installer setup UI $source in $seconds s"
 
+      - name: Lab one-line change
+        if: inputs.lab_touch
+        shell: bash
+        run: |
+          sed -i '1i // lab one-line change for the warm rebuild measurement' src/sparxie/runtime.cpp
+
       - name: Cache compiler objects
         uses: actions/cache/restore@v6
         with:
@@ -673,6 +683,7 @@ jobs:
           echo "objs: $objs"
           cc=gcc
           if [[ "$TOOLCHAIN" == clang ]]; then cc="clang -fuse-ld=lld"; fi
+          echo "NM symbols in sunshine.exe: $(nm build/sunshine.exe 2>/dev/null | wc -l)"
           $cc -O2 -Ithird-party/nanors tests/lab/fec_bench.c $objs -o fec_bench.exe
           for i in 1 2 3; do ./fec_bench.exe; done
 
