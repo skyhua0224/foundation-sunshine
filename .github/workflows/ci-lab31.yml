@@ -83,12 +83,12 @@ jobs:
           echo "SUBMODULE_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Cross build
         env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
           t0=$(date +%s)
-          scripts/ci/xc/build.sh "$RUNNER_TEMP/xc" "$GITHUB_WORKSPACE/build" 2>&1 | tee xc-build.log | grep -E "^(==|\[time\]|FAILED|.*error)" 
+          scripts/ci/xc/build.sh "$RUNNER_TEMP/xc" "$GITHUB_WORKSPACE/build" > xc-build.log 2>&1 || { tail -60 xc-build.log; grep -E "^FAILED|error:" xc-build.log | head -20; exit 1; }
           echo "XC_TOTAL_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -E "^\[time\]" xc-build.log | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Pack the binaries
