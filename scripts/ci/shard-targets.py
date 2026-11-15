@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Print the ninja outputs that shard INDEX of COUNT compiles.
 
-usage: ninja -C build -n | shard-targets.py INDEX COUNT [WEIGHTS]
+usage: ninja -C build -t commands | shard-targets.py INDEX COUNT [WEIGHTS]
 
-The input is the dry run of the default target: only the "Building <lang> object <path>" lines are split, so targets that
-are excluded from `all` (the Granite shader compiler, for one) are never compiled. Without WEIGHTS the outputs are dealt out in the order of
+The input is the command list of the default target: only the object files named by `-o <path>.obj` are split, so targets
+that are excluded from `all` (the Granite shader compiler, for one) are never compiled. (`ninja -n` is no use here: the dry run
+of a fresh build directory stops at the pending CMake re-run.) Without WEIGHTS the outputs are dealt out in the order of
 their path hash, which balances the count; with WEIGHTS (a .ninja_log of an earlier build) the longest-processing-time rule
 puts the next-longest output on the least loaded shard. Every shard reads the same input, so the shards partition the set.
 """
@@ -17,7 +18,7 @@ def main():
     index, count = int(sys.argv[1]), int(sys.argv[2])
     outputs = []
     for line in sys.stdin:
-        m = re.match(r"\[\d+/\d+\] Building \w+ object (.+?)\s*$", line)
+        m = re.search(r"\s-o\s+(\S+\.obj)(?:\s|$)", line)
         if m:
             outputs.append(m.group(1))
     outputs.sort(key=lambda p: hashlib.md5(p.encode()).hexdigest())
