@@ -331,7 +331,7 @@ jobs:
       # committer date (scripts/ci/release-info.py); otherwise the run is a dev build with a manual-<date> tag.
       - name: Setup Release (Manual)
         id: setup_release_manual
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_dispatch'
         env:
           PUBLISH: ${{ inputs.publish }}
           REF_NAME: ${{ github.ref_name }}
@@ -464,12 +464,12 @@ jobs:
       # Dependency drift canary (nightly only, informational): the installed package versions are kept as an artifact and
       # compared with the last successful nightly, so a red nightly can be tied to the packages that changed overnight.
       - name: Record the package versions
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch'
         shell: msys2 {0}
         run: pacman -Q | sort > "$GITHUB_WORKSPACE/packages.txt"
 
       - name: Package drift since the last nightly
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         shell: pwsh
         env:
@@ -483,7 +483,7 @@ jobs:
           if ($changes) { '```' >> $env:GITHUB_STEP_SUMMARY; $changes >> $env:GITHUB_STEP_SUMMARY; '```' >> $env:GITHUB_STEP_SUMMARY } else { "No package changed." >> $env:GITHUB_STEP_SUMMARY }
 
       - name: Keep the package versions
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: nightly-packages
@@ -566,7 +566,7 @@ jobs:
       - name: Cache compiler objects
         # The nightly build starts cold on purpose: it proves that a build from nothing still works with today's packages,
         # and the cache it saves replaces master's, which would otherwise only ever be topped up.
-        if: github.event_name != 'schedule'
+        if: github.event_name != 'workflow_dispatch'
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}\.ccache
