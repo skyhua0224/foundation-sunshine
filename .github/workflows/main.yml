@@ -684,12 +684,12 @@ jobs:
       - name: Lab measurements
         shell: msys2 {0}
         run: |
-          set -uo pipefail
+          set -u
           echo "### Lab ${TOOLCHAIN}"
-          (cd build && find . -maxdepth 2 \( -name '*.dll' -o -name '*.exe' \) -printf 'SIZE %s %p\n' | sort -k3) | head -12
+          (cd build && find . -maxdepth 2 \( -name '*.dll' -o -name '*.exe' \) -printf 'SIZE %s %p\n' | sort -k3) | sed -n 1,12p
           echo "NM symbols in sunshine.exe: $(nm build/sunshine.exe 2>/dev/null | wc -l)"
           echo "slowest edges (ms):"
-          awk 'NR>1 {print ($2-$1), $4}' build/.ninja_log | sort -rn | head -12
+          awk 'NR>1 {print ($2-$1), $4}' build/.ninja_log | sort -rn | sed -n 1,12p
           echo "edge time totals (s): all $(awk 'NR>1{s+=$2-$1} END{print s/1000}' build/.ninja_log)  link $(awk 'NR>1 && $4 ~ /\.(exe|dll)$/{s+=$2-$1} END{print s/1000}' build/.ninja_log)  pch $(awk 'NR>1 && $4 ~ /\.pch$/{s+=$2-$1} END{print s/1000}' build/.ninja_log)"
           cc=gcc; if [[ "$TOOLCHAIN" == clang ]]; then cc="clang -fuse-ld=lld"; fi
           objs=$(find build -path '*nanors*' -name '*.obj')
