@@ -1,0 +1,202 @@
+name: setup UI bench (fork test only)
+on:
+  push:
+    branches: [test/setup-ui-bench]
+permissions:
+  contents: read
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Panel submodule only
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git submodule update --init --depth 1 src_assets/common/sunshine-control-panel
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Fetch foundation-ui
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $sha = (Get-Content scripts/ci/foundation-ui.sha -Raw).Trim()
+          $dir = "$env:GITHUB_WORKSPACE/../ds5-ui-m3e"
+          git init -q $dir
+          git -C $dir fetch -q --depth 1 https://github.com/AlkaidLab/foundation-ui $sha
+          git -C $dir -c advice.detachedHead=false checkout -q FETCH_HEAD
+          npm ci --prefix $dir
+      - name: A. download and verify (fast path)
+        id: a
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: 'false'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: B. forced source build
+        id: b
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: 'true'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: C. missing asset falls back to source build
+        id: c
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: 'false'
+        run: |
+          $f = 'scripts/installer-inputs.json'
+          $j = Get-Content -Raw $f | ConvertFrom-Json
+          $j.setupUi.asset = 'does-not-exist.exe'
+          $j | ConvertTo-Json -Depth 5 | Set-Content $f
+          git diff --stat
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: reset pin
+        shell: pwsh
+        run: git checkout scripts/installer-inputs.json
+      - name: D. wrong sha256 must fail
+        id: d
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: 'false'
+        run: |
+          $f = 'scripts/installer-inputs.json'
+          $j = Get-Content -Raw $f | ConvertFrom-Json
+          $j.setupUi.sha256 = '0000000000000000000000000000000000000000000000000000000000000000'
+          $j | ConvertTo-Json -Depth 5 | Set-Content $f
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: reset pin 2
+        shell: pwsh
+        run: git checkout scripts/installer-inputs.json
+      - name: E. unattested file with matching sha256 must fail
+        id: e
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_FROM_SUBMODULE: 'false'
+        run: |
+          $f = 'scripts/installer-inputs.json'
+          $j = Get-Content -Raw $f | ConvertFrom-Json
+          $j.setupUi.asset = 'foundation-setup-ui-TAMPERED.exe'
+          $j.setupUi.sha256 = 'ff84d0d55129cb7e21a24683a0ec859845fc850618b0af29d5e3da0c49794d1e'
+          $j | ConvertTo-Json -Depth 5 | Set-Content $f
+          $PSNativeCommandUseErrorActionPreference = $true
+          $out = "$env:RUNNER_TEMP/installer-inputs/foundation-setup-ui.exe"
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $source = 'built from the Panel submodule'
+          $fetched = $false
+          if ($env:BUILD_FROM_SUBMODULE -eq 'true') {
+            Write-Output 'A manual run asked for the source build.'
+          } else {
+            ./scripts/fetch-setup-ui.ps1 -Output $out
+            if ($LASTEXITCODE -eq 0) { $fetched = $true; $source = 'downloaded and verified' }
+            elseif ($LASTEXITCODE -ne 10) { throw "fetch-setup-ui.ps1 failed with exit code $LASTEXITCODE" }
+          }
+          if (-not $fetched) {
+            ./scripts/build-setup-ui.ps1 `
+              -FoundationUi "$env:GITHUB_WORKSPACE/../ds5-ui-m3e" `
+              -Output $out
+          }
+          $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+          "SETUP_UI_EXE=$out" >> $env:GITHUB_ENV
+          "- installer setup UI: $source in $seconds s" >> $env:GITHUB_STEP_SUMMARY
+          Write-Output "installer setup UI $source in $seconds s"
+      - name: assert expected outcomes
+        shell: pwsh
+        run: |
+          "a=${{ steps.a.outcome }} b=${{ steps.b.outcome }} c=${{ steps.c.outcome }} d=${{ steps.d.outcome }} e=${{ steps.e.outcome }}"
+          if ('${{ steps.a.outcome }}${{ steps.b.outcome }}${{ steps.c.outcome }}' -ne 'successsuccesssuccess') { throw 'A, B, C must succeed' }
+          if ('${{ steps.d.outcome }}${{ steps.e.outcome }}' -ne 'failurefailure') { throw 'D and E must fail' }
