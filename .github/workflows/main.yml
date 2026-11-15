@@ -297,6 +297,7 @@ jobs:
 
       - name: Setup Release (Auto)
         id: setup_release_auto
+        continue-on-error: true  # test branch only
         if: github.event_name != 'workflow_dispatch'
         uses: LizardByte/setup-release-action@v2025.426.225
         with:
@@ -648,7 +649,7 @@ jobs:
           retention-days: 3
 
       - name: Build Windows
-        if: false
+        if: github.run_number < 0
         shell: msys2 {0}
         env:
           CCACHE_DIR: ${{ github.workspace }}\.ccache
