@@ -45,6 +45,16 @@
   （缓存按分支隔离，pull request 可读基础分支，源 `github-docs-dependency-caching-20261115`）。
 - 命中的前提是编译器路径和系统头文件路径一致：MSYS2 由 setup-msys2 装在 runner 的临时目录（`D:\a\_temp\msys64`），不要改用镜像自带的
   `C:\msys64`。位置一变，所有预处理结果和缓存键都不同，整份缓存失效（实测同一份缓存：临时目录 98% 命中，`C:\msys64` 17%）。
+- 工具链步骤对镜像卡顿有重试：setup-msys2 只负责解压和启动（`update: false`），基础系统升级、依赖包安装和包缓存由
+  `scripts/ci/msys2-pacman.sh` 完成。2026-11-15 主线运行 43736645013 的 8 个编译分片里 4 个死在 pacman 同步数据库
+  （`failed retrieving file 'ucrt64.db' from mirror.msys2.org : Operation too slow`，即 10 秒内一个字节都没收到），
+  setup-msys2 自带的 `update: true` 只执行一次 `pacman -Syuu`。现在同步、升级和安装各最多尝试 5 次，间隔 10、20、40、60 秒，
+  每次尝试单独限时 15 分钟，超时后清掉 pacman 的锁；每次从官方镜像列表的另一个服务器开始
+  （`repo.msys2.org`、`mirror.msys2.org`，再到 Tier 1），不丢弃任何镜像，源 `msys2-mirrors-20261116`、`msys2-mirrorlist-mingw-20261116`、
+  `pacman-conf-5-20261116`。只同步 `[msys]` 和 `[ucrt64]` 两个仓库。包文件放进 pacman 缓存目录，用 `actions/cache` 取前缀
+  `msys2-pkgs-ucrt64-` 的最新一份（只下载版本变了的包），只有默认分支保存，保存前只留已安装版本的文件；数据库每次现取，
+  工具链仍跟最新包。MSYS2 的位置不变（`D:\a\_temp\msys64`）。配置指纹读仓库数据库时也依次试两个主服务器、各三轮。
+  验证（fork）：正常、全部镜像断开 100 秒（每次尝试限时 45 秒，第一次超时、第二次换服务器后恢复）都通过。
 - 构建标识（提交、分支、渠道、CI 运行）不进入大多数编译单元：版本号只由 `src/build_info.cpp` 读取，
   新提交只会重编译这一个文件和真正改动的文件。
 
