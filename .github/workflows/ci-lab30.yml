@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [pch, ccache, jobs]
+        suite: [pch, ccache]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,9 +86,20 @@ jobs:
               get_target_property(type ${t} TYPE)
               get_target_property(sdir ${t} SOURCE_DIR)
               if(type MATCHES "EXECUTABLE|STATIC_LIBRARY|OBJECT_LIBRARY" AND NOT sdir MATCHES "_deps|third-party|googletest")
-                foreach(h IN LISTS _alk_hdrs)
+                # these two targets do not see the Boost.Log include directories
+                if(t MATCHES "^sunshine_(crypto|http)$")
+                  set(_hdrs "$ENV{ALK_PCH_LITE}")
+                else()
+                  set(_hdrs "${_alk_hdrs}")
+                endif()
+                foreach(h IN LISTS _hdrs)
                   target_precompile_headers(${t} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${h}>")
                 endforeach()
+                if(t STREQUAL "sunshine_host_objects")
+                  foreach(f src/video.cpp src/platform/windows/display_vram.cpp)
+                    set_property(SOURCE "${CMAKE_SOURCE_DIR}/${f}" TARGET_DIRECTORY ${t} PROPERTY SKIP_PRECOMPILE_HEADERS ON)
+                  endforeach()
+                endif()
               endif()
             endforeach()
           endfunction()
@@ -106,6 +117,8 @@ jobs:
           H
           sed -i 's/^          //' "$GITHUB_WORKSPACE/lab-pch-win.h"
           STD='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>;<nlohmann/json.hpp>;<boost/log/sources/severity_logger.hpp>;<boost/property_tree/ptree.hpp>'
+          LITE='<string>;<vector>;<algorithm>;<chrono>;<optional>;<string_view>;<mutex>;<memory>;<filesystem>;<thread>;<functional>;<map>;<unordered_map>;<nlohmann/json.hpp>'
+          export ALK_PCH_LITE="$LITE"
           pch() { echo "-DCMAKE_PROJECT_INCLUDE=$W/pch-apply.cmake"; }
           case "${{ matrix.suite }}" in
             flags)
@@ -130,8 +143,8 @@ jobs:
           for name in "${!V[@]}"; do
             echo "== configure $name"
             case "$name" in
-              pch-std|pch-std-inst|pchcc) export ALK_PCH_HEADERS="$STD" ;;
-              pch-win-inst) export ALK_PCH_HEADERS="$W/lab-pch-win.h;$STD" ;;
+              pch-std|pch-std-inst|pchcc) export ALK_PCH_HEADERS="$STD"; export ALK_PCH_LITE="$LITE" ;;
+              pch-win-inst) export ALK_PCH_HEADERS="$W/lab-pch-win.h;$STD"; export ALK_PCH_LITE="$W/lab-pch-win.h;$LITE" ;;
             esac
             if eval cmake -B "build-$name" "${common[@]}" ${V[$name]} > "configure-$name.log" 2>&1; then echo "$name" >> variants.txt; else echo "configure FAILED for $name"; tail -6 "configure-$name.log"; fi
           done
