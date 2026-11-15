@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - master
+      - ci/cache-debug
   workflow_dispatch:
     inputs:
       gui_run_id:
@@ -631,7 +632,23 @@ jobs:
             echo 'rtx_hdr=false' >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Dump preprocessed output (cache investigation)
+        shell: msys2 {0}
+        run: |
+          python3 scripts/ci/dump_preprocessed.py
+          mkdir -p "$GITHUB_WORKSPACE/pre"
+          cp /tmp/pre/* "$GITHUB_WORKSPACE/pre/"
+          { echo "### ccache"; ccache --version | head -1; ccache -p | grep -E "base_dir|hash_dir|sloppiness|compiler_check|compression|max_size|depend_mode|direct_mode"; } | tee -a "$GITHUB_STEP_SUMMARY"
+          env | grep -E "^(CCACHE|BRANCH|COMMIT|BUILD_VERSION|SUNSHINE_)" | sort
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pre-${{ github.run_number }}
+          path: pre
+          retention-days: 3
+
       - name: Build Windows
+        if: false
         shell: msys2 {0}
         env:
           CCACHE_DIR: ${{ github.workspace }}\.ccache
