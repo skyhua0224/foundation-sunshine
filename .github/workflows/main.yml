@@ -711,6 +711,7 @@ jobs:
       - name: Dump preprocessed output 2 and compare
         shell: msys2 {0}
         run: |
+          set +e +o pipefail
           python3 scripts/ci/dump_preprocessed.py
           mv pre pre2
           for f in pre1/*.i; do
