@@ -34,6 +34,13 @@ on:
         description: 'Build the installer setup UI from the Panel submodule instead of downloading the Panel repository build'
         type: boolean
         default: false
+      toolchain:
+        description: 'Compiler of the Windows build (official master always uses gcc)'
+        type: choice
+        default: gcc
+        options:
+          - 'gcc'
+          - 'clang'
       rtx_hdr:
         description: 'RTX HDR support for development branches (official master always requires ON)'
         type: choice
@@ -453,6 +460,8 @@ jobs:
       # MSYS2 UCRT64 with the build tools, Defender exclusions for the build directories, and a record of the runner CPU.
       - name: Toolchain
         uses: ./.github/actions/windows-toolchain
+        with:
+          toolchain: ${{ inputs.toolchain || 'gcc' }}
 
       # Packaging needs the Web UI build, the installer's setup UI and the Inno Setup package; pull requests that touch none
       # of what packaging reads skip them (job `changes`, output `package`). Web UI lint and tests run in the `webui` jobs.
@@ -598,6 +607,7 @@ jobs:
           # when a release asset is temporarily unavailable; official builds
           # continue to require the complete driver set.
           DRIVER_DEPS_REQUIRED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'OFF' || 'ON' }}
+          TOOLCHAIN: ${{ inputs.toolchain || 'gcc' }}
         run: |
           mkdir -p build
           ccache --zero-stats
@@ -608,10 +618,15 @@ jobs:
           if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
             gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
           fi
+          compiler=()
+          if [[ "$TOOLCHAIN" == clang ]]; then
+            compiler=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld)
+          fi
           cmake \
             -B build \
             -G Ninja \
             -S . \
+            "${compiler[@]}" \
             "${gui_options[@]}" \
             -DBUILD_DOCS=OFF \
             -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
