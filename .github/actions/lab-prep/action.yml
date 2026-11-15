@@ -1,0 +1,36 @@
+name: Lab prepare
+description: Fork-only lab helper. Targeted submodules, the MSYS2 UCRT64 toolchain and the production-flag configure, so that every lab job starts from the same state.
+runs:
+  using: composite
+  steps:
+    - name: Keep LF line endings
+      shell: bash
+      run: git config --global core.autocrlf false
+    - name: Submodules
+      shell: bash
+      run: scripts/ci/init-submodules.sh windows
+    - name: Toolchain
+      uses: ./.github/actions/windows-toolchain
+    - name: Configure
+      shell: msys2 {0}
+      env:
+        BRANCH: ci-lab
+        BUILD_VERSION: lab.zayu
+        COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        SUNSHINE_BUILD_COMMIT: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        SUNSHINE_BUILD_BRANCH: ci-lab
+        SUNSHINE_BUILD_CHANNEL: dev
+        SUNSHINE_BUILD_BUILDER: ci
+        GITHUB_TOKEN: ${{ github.token }}
+        CCACHE_DIR: ${{ github.workspace }}\.ccache
+        CCACHE_MAXSIZE: 2G
+        CCACHE_COMPILERCHECK: content
+      run: |
+        set -euo pipefail
+        t0=$(date +%s)
+        mkdir -p build
+        ccache --zero-stats
+        export PATH="$PATH:/c/Program Files/dotnet"
+        cmake -B build -G Ninja -S . -DBUILD_DOCS=OFF -DSUNSHINE_RTX_HDR=OFF -DBUILD_TESTS=ON -DBUILD_TRAY_TESTS=ON -DBUILD_WEB_UI=OFF \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DSUNSHINE_ASSETS_DIR=assets -DDRIVER_DEPS_REQUIRED=OFF
+        echo "configure $(( $(date +%s) - t0 )) s"

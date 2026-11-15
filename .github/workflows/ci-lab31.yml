@@ -1,0 +1,155 @@
+name: ci-lab31
+# Fork-only: cross-compile the Windows host on Linux (Fedora UCRT64 GCC 16 + MSYS2 UCRT64 packages), run the native tests on
+# windows-latest from an artifact, and compare with the MSYS2 build of the same commit on windows-latest.
+on:
+  push:
+    branches: ["ci/lab31-**"]
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+defaults:
+  run:
+    shell: bash
+jobs:
+  win:
+    name: win (MSYS2 GCC, cold)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/lab-prep
+      - name: Build
+        shell: msys2 {0}
+        env:
+          CCACHE_DIR: ${{ github.workspace }}\.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          t0=$(date +%s)
+          ninja -C build
+          echo "WIN_BUILD_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats
+      - name: Native tests
+        shell: msys2 {0}
+        run: |
+          t0=$(date +%s)
+          ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600
+          echo "WIN_CTEST_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Binary facts
+        shell: msys2 {0}
+        run: |
+          mkdir -p facts
+          for f in build/sunshine.exe build/tests/test_sunshine.exe; do
+            [ -f "$f" ] || f=$(ls build/sunshine.exe-* 2>/dev/null | head -1)
+          done
+          for f in build/sunshine.exe* build/tests/test_sunshine.exe; do
+            [ -f "$f" ] || continue
+            n=$(basename "$f")
+            objdump -p "$f" | grep -E "DLL Name|MajorOS|MajorImage|MajorSubsystem|Subsystem" | sort -u > "facts/$n.imports.txt"
+            strings -a "$f" | grep -E "^GCC: \(|libstdc\+\+|__cxa_" | head -3 > "facts/$n.ident.txt" || true
+            ls -l "$f" | awk '{print $5}' > "facts/$n.size.txt"
+          done
+          pacman -Q mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-headers > facts/toolchain.txt
+          ls facts; cat facts/*.imports.txt | head -40
+      - uses: actions/upload-artifact@v7
+        with:
+          name: facts-win
+          path: facts
+  xc:
+    name: xc (Linux cross, cold)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    timeout-minutes: 120
+    steps:
+      - name: Cross toolchain from the distribution
+        run: |
+          t0=$(date +%s)
+          dnf -q install -y ucrt64-gcc-c++ ucrt64-binutils ucrt64-crt ucrt64-headers ucrt64-winpthreads-static cmake ninja-build ccache python3 git pkgconf-pkg-config zstd tar xz make diffutils file which
+          echo "DNF_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          x86_64-w64-mingw32ucrt-g++ --version | head -1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "cpus: $(nproc), $(grep -m1 'model name' /proc/cpuinfo)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Submodules
+        run: |
+          t0=$(date +%s)
+          git config --global --add safe.directory '*'
+          scripts/ci/init-submodules.sh windows
+          echo "SUBMODULE_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Cross build
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          t0=$(date +%s)
+          scripts/ci/xc/build.sh "$RUNNER_TEMP/xc" "$GITHUB_WORKSPACE/build" 2>&1 | tee xc-build.log | grep -E "^(==|\[time\]|FAILED|.*error)" 
+          echo "XC_TOTAL_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E "^\[time\]" xc-build.log | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Pack the binaries
+        run: |
+          t0=$(date +%s)
+          cd build
+          find . \( -name '*.exe' -o -name '*.dll' -o -name 'CTestTestfile.cmake' -o -name 'DartConfiguration.tcl' \) -not -path './CMakeFiles/*' -print0 \
+            | tar --null -T - -cf - | zstd -T0 -3 -q -o ../xc-binaries.tar.zst
+          cd ..
+          ls -l xc-binaries.tar.zst | awk '{print "ARTIFACT_BYTES=" $5}' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "PACK_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p facts
+          for f in build/sunshine.exe* build/tests/test_sunshine.exe; do
+            [ -f "$f" ] || continue
+            n=$(basename "$f")
+            x86_64-w64-mingw32ucrt-objdump -p "$f" | grep -E "DLL Name|MajorOS|MajorImage|MajorSubsystem|Subsystem" | sort -u > "facts/$n.imports.txt"
+            strings -a "$f" | grep -E "^GCC: \(" | head -3 > "facts/$n.ident.txt" || true
+            stat -c %s "$f" > "facts/$n.size.txt"
+          done
+          cp -r "$RUNNER_TEMP/xc/msys2/packages.txt" facts/msys2-packages.txt
+          rpm -q ucrt64-gcc ucrt64-crt ucrt64-headers > facts/toolchain.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: xc-binaries
+          path: xc-binaries.tar.zst
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: facts-xc
+          path: facts
+  native:
+    name: native tests of the cross build
+    needs: xc
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: xc-binaries
+          path: dl
+      - name: Unpack and point the test files at this workspace
+        run: |
+          t0=$(date +%s)
+          mkdir build
+          tar -xf dl/xc-binaries.tar.zst -C build
+          ws="D:/a/foundation-sunshine/foundation-sunshine"
+          find build -name CTestTestfile.cmake -print0 | xargs -0 sed -i "s#/__w/foundation-sunshine/foundation-sunshine#${ws}#g"
+          echo "UNPACK_SECONDS=$(( $(date +%s) - t0 ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -m3 -h "add_test" build/tests/CTestTestfile.cmake | cut -c1-200
+      - name: Native tests (no MSYS2 on the PATH)
+        shell: cmd
+        run: |
+          ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 > ctest-native.log 2>&1
+          echo exit=%ERRORLEVEL%
+          type ctest-native.log | findstr /R /C:"tests passed" /C:"Failed" /C:"Not Run" /C:"Test #"
+        continue-on-error: true
+      - name: Summary of the test run
+        run: |
+          tail -15 ctest-native.log | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -c "Passed" ctest-native.log || true
