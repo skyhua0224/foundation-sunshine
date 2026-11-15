@@ -89,6 +89,39 @@ class PublishTest(unittest.TestCase):
         self.assertNotIn("publish_release", upload.get("if", ""))
 
 
+class PackagingBesideTestsTest(unittest.TestCase):
+    """The packages are made while the native tests run (scripts/ci/package-windows.sh); a reorder must not lose a part of that."""
+
+    def setUp(self):
+        self.build = load()["jobs"]["build_win"]
+        self.names = [s.get("name") for s in self.build["steps"]]
+
+    def test_the_tools_the_packages_need_are_ready_before_the_tests_start(self):
+        tests = self.names.index("Run native tests and package")
+        for name in ("Cache Inno Setup", "Install Inno Setup", "Add Inno Setup to PATH", "Fetch dump_syms"):
+            self.assertLess(self.names.index(name), tests, name)
+        self.assertNotIn("Package Windows", self.names)
+
+    def test_one_step_starts_both_parts_before_ctest_and_waits_for_both(self):
+        run = step(self.build, "Run native tests and package")["run"]
+        self.assertLess(run.index("package-windows.sh"), run.index("ctest "))
+        self.assertIn("for part in installer portable", run)
+        self.assertIn('wait "${packages[$part]}"', run)
+        self.assertIn("exit $status", run)
+        self.assertEqual(step(self.build, "Run native tests and package")["env"]["PACKAGE"], "${{ needs.changes.outputs.package }}")
+
+    def test_the_assembly_and_the_upload_come_after_the_step_that_makes_the_packages(self):
+        tests = self.names.index("Run native tests and package")
+        for name in ("Assemble installer", "Rename release assets", "Generate Checksums", "Upload Artifacts"):
+            self.assertGreater(self.names.index(name), tests, name)
+
+    def test_the_script_has_the_two_parts_and_the_checks_that_were_in_the_workflow(self):
+        script = (WORKFLOW.parents[2] / "scripts" / "ci" / "package-windows.sh").read_text(encoding="utf-8")
+        for needle in ("installer)", "portable)", "make-symbols.py", "--strip-staged", "ISCC.exe", "cpack -G ZIP", "sunshine-symbols.zip",
+                       "sunshine-windows-portable.zip", "Sunshine-engine.exe", "RTX_VIDEO_ADAPTER_REQUIRED", "hdr-components"):
+            self.assertIn(needle, script)
+
+
 class ShardTest(unittest.TestCase):
     def setUp(self):
         self.workflow = load()
