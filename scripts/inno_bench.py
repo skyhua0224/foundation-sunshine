@@ -15,12 +15,13 @@ base = "Compression=lzma2/ultra64\nSolidCompression=yes"
 assert base in tpl
 VARIANTS = [
     ("base ultra64 (today)", "Compression=lzma2/ultra64\nSolidCompression=yes"),
-    ("ultra64 threads=2", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=2"),
-    ("ultra64 threads=4", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4"),
-    ("ultra64 threads=4 separate", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMAUseSeparateProcess=yes"),
-    ("max threads=4", "Compression=lzma2/max\nSolidCompression=yes\nLZMANumBlockThreads=4"),
-    ("normal threads=4", "Compression=lzma2/normal\nSolidCompression=yes\nLZMANumBlockThreads=4"),
-    ("fast threads=4", "Compression=lzma2/fast\nSolidCompression=yes\nLZMANumBlockThreads=4"),
+    ("ultra64 separate process", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMAUseSeparateProcess=yes"),
+    ("ultra64 t4 block 64M", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMABlockSize=65536"),
+    ("ultra64 t4 block 32M", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMABlockSize=32768"),
+    ("ultra64 t4 block 16M", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMABlockSize=16384"),
+    ("ultra64 t4 block 64M separate", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMABlockSize=65536\nLZMAUseSeparateProcess=yes"),
+    ("ultra64 t4 block 32M separate", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=4\nLZMABlockSize=32768\nLZMAUseSeparateProcess=yes"),
+    ("ultra64 t2 block 64M separate", "Compression=lzma2/ultra64\nSolidCompression=yes\nLZMANumBlockThreads=2\nLZMABlockSize=65536\nLZMAUseSeparateProcess=yes"),
 ]
 REPEATS = int(os.environ.get("REPEATS", "3"))
 only = os.environ.get("ONLY")
