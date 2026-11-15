@@ -34,7 +34,7 @@ jobs:
           CCACHE_COMPILERCHECK: content
         run: |
           set -euo pipefail
-          ninja -C build -t targets all | python scripts/ci/shard-targets.py ${{ matrix.i }} ${{ inputs.count }} > shard.txt
+          ninja -C build -n | python scripts/ci/shard-targets.py ${{ matrix.i }} ${{ inputs.count }} > shard.txt
           echo "shard outputs: $(wc -l < shard.txt)"
           { echo "ninja_required_version = 1.10"; echo "include build.ninja"; printf 'build lab_shard: phony'; while read -r o; do o=${o%$'\r'}; o=${o//\$/\$\$}; o=${o// /\$ }; o=${o//:/\$:}; printf ' %s' "$o"; done < shard.txt; echo; } > build/shard.ninja
           t0=$(date +%s)

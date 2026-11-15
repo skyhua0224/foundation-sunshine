@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Print the ninja outputs that shard INDEX of COUNT compiles.
 
-usage: ninja -C build -t targets all | shard-targets.py INDEX COUNT [WEIGHTS]
+usage: ninja -C build -n | shard-targets.py INDEX COUNT [WEIGHTS]
 
-Only compile outputs (rule names containing COMPILER__) are split. Without WEIGHTS the outputs are dealt out in the order of
+The input is the dry run of the default target: only the "Building <lang> object <path>" lines are split, so targets that
+are excluded from `all` (the Granite shader compiler, for one) are never compiled. Without WEIGHTS the outputs are dealt out in the order of
 their path hash, which balances the count; with WEIGHTS (a .ninja_log of an earlier build) the longest-processing-time rule
 puts the next-longest output on the least loaded shard. Every shard reads the same input, so the shards partition the set.
 """
 import hashlib
+import re
 import sys
 
 
@@ -15,9 +17,9 @@ def main():
     index, count = int(sys.argv[1]), int(sys.argv[2])
     outputs = []
     for line in sys.stdin:
-        path, _, rule = line.rstrip("\n").partition(": ")
-        if "COMPILER__" in rule:
-            outputs.append(path)
+        m = re.match(r"\[\d+/\d+\] Building \w+ object (.+?)\s*$", line)
+        if m:
+            outputs.append(m.group(1))
     outputs.sort(key=lambda p: hashlib.md5(p.encode()).hexdigest())
     weights = {}
     if len(sys.argv) > 3:
