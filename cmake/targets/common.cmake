@@ -1,3 +1,9 @@
+# TEST ONLY: pretend the RTX adapter was built, to exercise the per-target adapter definitions without the private SDK
+if(NOT TARGET sunshine_rtx_video_adapter)
+    set(RTX_VIDEO_TRUST_INCLUDE "${CMAKE_BINARY_DIR}/fake_trust")
+    file(WRITE "${RTX_VIDEO_TRUST_INCLUDE}/rtx_video_trust.h" "#pragma once\n#define SUNSHINE_RTX_VIDEO_ADAPTER_SHA256 \"00\"\n#define SUNSHINE_RTX_VIDEO_RUNTIME_SHA256 \"00\"\n")
+    add_custom_target(sunshine_rtx_video_adapter)
+endif()
 # common target definitions
 # this file will also load platform specific macros
 
