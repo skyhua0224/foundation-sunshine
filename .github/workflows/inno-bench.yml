@@ -1,0 +1,36 @@
+name: inno bench (fork test only)
+on:
+  push:
+    branches: [test/inno-bench]
+permissions:
+  contents: read
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $installer = "$env:TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -Wait
+      - name: Fetch the shipped payload (portable package of the latest pre-release)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          gh release download "v2026.1114.173055.杂鱼" --repo AlkaidLab/foundation-sunshine -p '*Portable-x64.zip' -D "$env:RUNNER_TEMP/payload"
+          Expand-Archive "$env:RUNNER_TEMP/payload/*.zip" -DestinationPath "$env:RUNNER_TEMP/payload/x"
+          Get-ChildItem "$env:RUNNER_TEMP/payload/x" | Select-Object Name
+          $root = (Get-ChildItem "$env:RUNNER_TEMP/payload/x" -Directory | Select-Object -First 1).FullName
+          "STAGING=$root" >> $env:GITHUB_ENV
+          "{0} files, {1:N1} MB" -f (Get-ChildItem $root -Recurse -File).Count, ((Get-ChildItem $root -Recurse -File | Measure-Object Length -Sum).Sum/1MB)
+      - name: Benchmark (3 interleaved repeats)
+        shell: pwsh
+        run: python scripts/inno_bench.py "$env:STAGING" "$env:RUNNER_TEMP/bench" "$env:GITHUB_WORKSPACE"
