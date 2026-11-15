@@ -77,11 +77,13 @@
 
 | ID | 项目 | 通过标准 | 方式 | 脚本 |
 |---|---|---|---|---|
-| U1 | Panel 概览磁贴各尺寸 | 360 至 1920 px 宽、深浅主题、空闲与串流中、智能与手动 s/m/l/xl：没有被截断、重叠、被遮盖、缩得过小的文字或图标 | 自动·Linux（真实长度的数据；测的是 Panel 源码树的该提交） | 内部巡检机器人的 `tile-fit`；报告里写被测的 Panel 提交 |
+| U1 | Panel 概览磁贴各尺寸 | 360 至 1920 px 宽、深浅主题、空闲与串流中、智能与手动 s/m/l/xl：没有被截断、竖排成一字一行、重叠、被遮盖、跑出底板的文字或图标。被测的是发布版 Panel（`foundation-panel` 的 `main`）加上 `foundation-ui` 的 `main`（可再叠加未合并的 PR），数据取自真实主机的副本 | 自动·Linux | `panel-tile-gate.sh`；报告里写 Panel 和 foundation-ui 的提交 |
 | U2 | Panel 在目标机器上能启动、能连到主机 | 窗口出现，概览有数据 | **作者** | 手动 |
 | W1 | Web UI 页面 | `/`、`/config`、`/apps`、`/password`、`/pin`、`/troubleshooting`、`/dualsense`、`/downloads` 都返回 200 | 自动·Win | `windows-host-smoke.ps1`（`web.page.*`） |
 | W2 | Web UI 单元与文档测试 | CI 的 Web UI 分片全部通过 | 自动·Linux（CI） | `gh run view` |
 | W3 | 配置保存 | 在 `/config` 改一项、保存、重启后仍在 | **作者** | 手动 |
+
+磁贴门禁的前提：Panel 开发服务器、主机替身、Tauri 桥替身都要先起来，并且桥替身要回答发布版 Panel 启动时调用的全部命令（例如 `probe_sunshine_host` 必须返回 HTTP 状态，否则 Panel 一直停在「正在连接」，概览不会挂载）。门禁以 `.m-dash__cell` 超时退出时，说明什么都没测，不是磁贴有问题。
 
 ## 七、Sparxie
 
