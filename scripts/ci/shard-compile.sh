@@ -46,6 +46,7 @@ owns_static() {
 }
 
 mine=0; built_seconds=0; started=$(date +%s)
+if [[ "${SHARD_TEST:-}" == edge && "$index" == "$(( count - 1 ))" ]]; then echo "TEST: this runner starts late"; sleep 540; fi
 for (( k = 0; k < chunks; k++ )); do
   if [[ "$dynamic" == true ]]; then
     code="$(claim "$k")"
@@ -60,6 +61,7 @@ for (( k = 0; k < chunks; k++ )); do
   else
     owns_static "$k" || continue
   fi
+  if [[ "${SHARD_TEST:-}" == edge && "$index" == 3 && "$mine" == 2 ]]; then echo "TEST: this runner dies after two chunks, holding chunk $k"; exit 1; fi
   t0=$(date +%s)
   ninja -C build -f shard.ninja "ci_chunk_$k"
   secs=$(( $(date +%s) - t0 ))
