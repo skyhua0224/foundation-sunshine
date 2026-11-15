@@ -1,0 +1,47 @@
+name: publish-logic-test
+on:
+  push:
+    branches: [ci/publish-logic]
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Dummy assets
+        run: |
+          mkdir dist && echo one > dist/a.txt
+      - name: Existing pre-release and existing full release
+        run: |
+          gh release create zz-test-pre dist/a.txt --target "$COMMIT" --prerelease --title zz-test-pre --notes pre
+          gh release create zz-test-full dist/a.txt --target "$COMMIT" --title zz-test-full --notes full
+      - name: Against the pre-release (assets are replaced)
+        env:
+          TAG: zz-test-pre
+        run: |
+          echo two > dist/a.txt
+          bash scripts/ci/publish-prerelease.sh dist
+          gh release download zz-test-pre --pattern a.txt --output - | grep -x two
+      - name: Against the full release (refused, assets untouched)
+        env:
+          TAG: zz-test-full
+        run: |
+          if bash scripts/ci/publish-prerelease.sh dist; then echo "should have failed"; exit 1; fi
+          gh release download zz-test-full --pattern a.txt --output - | grep -x one
+      - name: Against no release (created as a pre-release)
+        env:
+          TAG: zz-test-new
+        run: |
+          bash scripts/ci/publish-prerelease.sh dist
+          test "$(gh release view zz-test-new --json isPrerelease --jq .isPrerelease)" = true
+      - name: Clean up
+        if: always()
+        run: |
+          for t in zz-test-pre zz-test-full zz-test-new; do gh release delete "$t" --cleanup-tag --yes || true; done
