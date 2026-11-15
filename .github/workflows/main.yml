@@ -34,6 +34,10 @@ on:
         description: 'Build the installer setup UI from the Panel submodule instead of downloading the Panel repository build'
         type: boolean
         default: false
+      cache_scope:
+        description: 'Lab: separate compiler-cache lineage; a fresh value gives a cold build'
+        type: string
+        default: ''
       toolchain:
         description: 'Compiler of the Windows build (official master always uses gcc)'
         type: choice
@@ -547,9 +551,9 @@ jobs:
           # still consume the shared cache quota, and when that quota fills
           # (10 GB, LRU), eviction wiped the whole lineage once and forced a
           # full 47-minute cold rebuild.
-          key: ccache-windows-${{ github.run_id }}
+          key: ccache-lab-${{ inputs.cache_scope }}-${{ github.run_id }}
           restore-keys: |
-            ccache-windows-
+            ccache-lab-${{ inputs.cache_scope }}-
 
       # The Panel bundle and the WebView2 bootstrapper, pinned by tag/sha256 in scripts/installer-inputs.json and verified (never
       # "latest"). The pinned Panel commit must be the committed submodule. A manual run with gui_run_id replaces the GUI below.
@@ -656,6 +660,22 @@ jobs:
           ninja -C build
           ccache --show-stats --verbose
 
+      - name: Lab measurements
+        shell: msys2 {0}
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain || 'gcc' }}
+        run: |
+          set -euo pipefail
+          echo "### Lab ${TOOLCHAIN}"
+          (cd build && ls -l sunshine.exe tools/*.exe 2>/dev/null | awk '{print "SIZE", $5, $NF}')
+          (cd build && find . -maxdepth 2 \( -name '*.dll' -o -name '*.exe' \) -printf 'SIZE %s %p\n' | sort -k3) | head -40
+          objs=$(find build -path '*nanors*' -name '*.obj')
+          echo "objs: $objs"
+          cc=gcc
+          if [[ "$TOOLCHAIN" == clang ]]; then cc="clang -fuse-ld=lld"; fi
+          $cc -O2 -Ithird-party/nanors tests/lab/fec_bench.c $objs -o fec_bench.exe
+          for i in 1 2 3; do ./fec_bench.exe; done
+
       - name: Run native tests
         shell: msys2 {0}
         run: ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml"
@@ -715,7 +735,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ github.workspace }}\.ccache
-          key: ccache-windows-${{ github.run_id }}
+          key: ccache-lab-${{ inputs.cache_scope }}-${{ github.run_id }}
 
       - name: Prune stale compiler cache entries
         # Collapse the cache to exactly one entry (the newest one saved).
