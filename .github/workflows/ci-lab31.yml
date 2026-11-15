@@ -51,7 +51,10 @@ jobs:
             objdump -p "$f" | grep -E "DLL Name|MajorOS|MajorImage|MajorSubsystem|Subsystem" | sort -u > "facts/$n.imports.txt"
             strings -a "$f" | grep -E "^GCC: \(|libstdc\+\+|__cxa_" | head -3 > "facts/$n.ident.txt" || true
             ls -l "$f" | awk '{print $5}' > "facts/$n.size.txt"
+            objdump -h "$f" | awk '/^ +[0-9]+ /{print $2, $3}' > "facts/$n.sections.txt"
           done
+          g++ -v 2>&1 | tail -30 > facts/gcc-v.txt
+          g++ -O3 -Q --help=common 2>/dev/null | grep -E "enabled\]" | sort > facts/gcc-enabled-flags.txt || true
           pacman -Q mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-headers > facts/toolchain.txt
           ls facts; cat facts/*.imports.txt | head -40
       - uses: actions/upload-artifact@v7
@@ -110,8 +113,12 @@ jobs:
             x86_64-w64-mingw32ucrt-objdump -p "$f" | grep -E "DLL Name|MajorOS|MajorImage|MajorSubsystem|Subsystem" | sort -u > "facts/$n.imports.txt"
             strings -a "$f" | grep -E "^GCC: \(" | head -3 > "facts/$n.ident.txt" || true
             stat -c %s "$f" > "facts/$n.size.txt"
+            x86_64-w64-mingw32ucrt-objdump -h "$f" | awk '/^ +[0-9]+ /{print $2, $3}' > "facts/$n.sections.txt"
           done
           cp -r "$RUNNER_TEMP/xc/msys2/packages.txt" facts/msys2-packages.txt
+          x86_64-w64-mingw32ucrt-g++ -v 2>&1 | tail -30 > facts/gcc-v.txt
+          x86_64-w64-mingw32ucrt-g++ -O3 -Q --help=common 2>/dev/null | grep -E "enabled\]" | sort > facts/gcc-enabled-flags.txt || true
+          cp xc-build.log facts/
           rpm -q ucrt64-gcc ucrt64-crt ucrt64-headers > facts/toolchain.txt
       - uses: actions/upload-artifact@v7
         with:
