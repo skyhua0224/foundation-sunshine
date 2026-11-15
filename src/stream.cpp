@@ -4115,6 +4115,7 @@ namespace stream {
       }
       catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
+        telemetry::report_error("E_VIDEO_BROADCAST", "error", true);
         std::this_thread::sleep_for(100ms);
       }
     }

@@ -28,6 +28,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "error_report.h"
 #include "events.h"
 #include "hooks.h"
 #include "queue.h"
@@ -141,6 +142,12 @@ namespace telemetry {
     record_frame_done(std::uint32_t session_id, std::int64_t steady_ns) noexcept;
     remote_config_t
     remote_config() const;
+    /** The user's last actions and state changes (a bounded ring, attached to every error report). */
+    void
+    crumb(crumb_e kind, std::string_view id);
+    /** An error of this component with its location and stack; the first of a fingerprint leaves at once, the rest is counted. Thread safe, never blocks on I/O. */
+    void
+    report_error(const error_input_t &error);
     bool streams_active() const;
     /** The sampler: read each active session's counters and the client's reports (probes) once. */
     void tick_streams(const std::vector<session_probe_t> &probes);
@@ -248,6 +255,8 @@ namespace telemetry {
       std::string text;
       int tries = 0;
     };
+    breadcrumbs_t crumbs_;
+    error_reporter_t reporter_;
     mutable std::mutex ring_mutex_;  // the log ring; held for a few instructions
     std::deque<ring_line_t> log_ring_;
     std::deque<pending_log_t> pending_logs_;  // sender thread only
