@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - master
+      - ci/push-test-e
   workflow_dispatch:
     inputs:
       gui_run_id:
