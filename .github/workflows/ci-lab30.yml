@@ -165,7 +165,7 @@ jobs:
           measure() {  # name builddir r [ninja args...]
             local name=$1 dir=$2 r=$3; shift 3
             for o in $(cat tus.txt); do rm -f "$dir/$o"; done
-            find "$dir" -name 'cmake_pch*' -delete 2>/dev/null || true
+            find "$dir" -name '*.pch' -delete 2>/dev/null || true
             s=$(date +%s.%N)
             ninja -C "$dir" -k 0 "$@" $(cat tus.txt) > "run-$name-$r.log" 2>&1 || true
             e=$(date +%s.%N)
