@@ -95,7 +95,7 @@ jobs:
         run: |
           t0=$(date +%s)
           rm -rf stage && mkdir stage
-          (cd build && find . \( -name '*.exe' -o -name '*.dll' -o -name 'CTestTestfile.cmake' -o -name 'DartConfiguration.tcl' \) -not -path './CMakeFiles/*' -print0 \
+          (cd build && find . -type f \( -name '*.exe' -o -name '*.dll' -o -name 'CTestTestfile.cmake' -o -name 'DartConfiguration.tcl' \) -not -path './CMakeFiles/*' -print0 \
             | tar --null -T - -cf - ) | tar -C stage -xf -
           raw=$(du -sm stage | cut -f1)
           find stage -name '*.exe' -print0 | xargs -0 -n8 -P4 x86_64-w64-mingw32ucrt-strip --strip-all
