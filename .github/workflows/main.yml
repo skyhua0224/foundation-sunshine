@@ -673,6 +673,8 @@ jobs:
           echo "objs: $objs"
           cc=gcc
           if [[ "$TOOLCHAIN" == clang ]]; then cc="clang -fuse-ld=lld"; fi
+          echo "NM symbols in sunshine.exe: $(nm build/sunshine.exe 2>/dev/null | wc -l)"
+          nm build/sunshine.exe 2>/dev/null | grep -c ' [Tt] ' || true
           $cc -O2 -Ithird-party/nanors tests/lab/fec_bench.c $objs -o fec_bench.exe
           for i in 1 2 3; do ./fec_bench.exe; done
 

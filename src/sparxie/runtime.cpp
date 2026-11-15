@@ -1,3 +1,4 @@
+// lab: one-line change for the warm rebuild measurement
 #include "src/sparxie/runtime.h"
 #include "src/config.h"
 #include "src/display_device/display_device.h"
