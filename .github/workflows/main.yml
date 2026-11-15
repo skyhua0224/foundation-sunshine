@@ -38,6 +38,10 @@ on:
         description: 'Lab: separate compiler-cache lineage; a fresh value gives a cold build'
         type: string
         default: ''
+      lab_disable:
+        description: 'Lab: space separated list of options to turn off: pch depend'
+        type: string
+        default: ''
       lab_touch:
         description: 'Lab: add one comment line to a source file before building (warm rebuild measurement)'
         type: boolean
@@ -635,6 +639,8 @@ jobs:
           if [[ -n "${GUI_BUNDLE_DIR:-}" ]]; then
             gui_options=(-DFETCH_GUI=OFF "-DGUI_DIR=$GUI_BUNDLE_DIR")
           fi
+          lab_options=()
+          if [[ "${{ inputs.lab_disable }}" == *pch* ]]; then lab_options=(-DSUNSHINE_PRECOMPILED_HEADERS=OFF); fi
           compiler=()
           if [[ "$TOOLCHAIN" == clang ]]; then
             # lld links the same objects as GNU ld at the same speed (measured), so this is only about one linker for the one
@@ -646,6 +652,7 @@ jobs:
             -G Ninja \
             -S . \
             "${compiler[@]}" \
+            "${lab_options[@]}" \
             "${gui_options[@]}" \
             -DBUILD_DOCS=OFF \
             -DSUNSHINE_RTX_HDR="$SUNSHINE_RTX_HDR" \
@@ -675,7 +682,7 @@ jobs:
           # time: a miss costs 2.5% over no cache instead of 12% (measured on three VMs); hits cost the same. The precompiled
           # header needs these two sloppiness settings to be cached at all, or every unit that uses it bypasses the cache.
           # https://ccache.dev/manual/latest.html#_the_depend_mode and #_precompiled_headers
-          CCACHE_DEPEND: '1'
+          CCACHE_DEPEND: ${{ contains(inputs.lab_disable, 'depend') && '0' || '1' }}
           CCACHE_SLOPPINESS: pch_defines,time_macros
         run: |
           ninja -C build
