@@ -16,5 +16,5 @@ for w in wanted:
     # without the ccache launcher: the raw compiler
     out=re.sub(r'^\S*ccache(\.exe)? ','',out)
     open('pre/'+w.replace('/','_')+'.cmd','w').write(out)
-    r=subprocess.run(['bash','-c',out],cwd='build',capture_output=True,text=True); print(out[:200], '...', out[-200:], r.stdout[:200])
+    r=subprocess.run(out,cwd='build',capture_output=True,text=True)
     print(w,'rc',r.returncode,os.path.getsize('pre/'+name) if os.path.exists('pre/'+name) else 'missing',r.stderr[:200])
