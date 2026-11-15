@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - master
+      - ci/batch-test
   schedule:
     # Nightly: a cold build with the latest toolchain packages, the full native tests, and a fresh compiler cache for master.
     - cron: '17 20 * * *'
@@ -299,6 +300,7 @@ jobs:
 
       - name: Setup Release (Auto)
         id: setup_release_auto
+        continue-on-error: true  # test branch only
         if: github.event_name == 'push' || github.event_name == 'pull_request'
         uses: LizardByte/setup-release-action@v2025.426.225
         with:
@@ -678,7 +680,13 @@ jobs:
 
       - name: Run native tests
         shell: msys2 {0}
-        run: ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml"
+        run: |
+          status=0
+          for round in 1 2 3 4 5; do
+            echo "=== ctest -j4, round $round"
+            ctest --test-dir build -j4 --no-tests=error --output-on-failure --timeout 600 --output-junit "$GITHUB_WORKSPACE/ctest.xml" || status=1
+          done
+          exit $status
 
       # Pull requests without the NVIDIA SDK secrets never compile the adapter branches that master builds. This configures the
       # same definitions with placeholder digests and runs the tests that load fake adapters, so a build-graph change that
