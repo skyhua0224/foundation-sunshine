@@ -2,6 +2,7 @@
 
 import gzip
 import io
+import os
 import pathlib
 import shutil
 import subprocess
@@ -115,8 +116,9 @@ class FingerprintTest(unittest.TestCase):
 
 
 class HotHeadersTest(unittest.TestCase):
-    def run_hot(self, *args, stdin=""):
-        return subprocess.run([sys.executable, str(HOT), *args], input=stdin, capture_output=True, text=True)
+    def run_hot(self, *args, stdin="", env=None):
+        return subprocess.run([sys.executable, str(HOT), *args], input=stdin, capture_output=True, text=True,
+                              env=None if env is None else {**os.environ, **env})
 
     def test_generate_weighs_the_headers_by_the_compile_time_of_the_object_files_that_include_them(self):
         # slow.obj takes 90 of 100 s and includes heavy.h; light.h is in nine quick object files (a count of 90%, a time share of 9%)
@@ -149,6 +151,40 @@ class HotHeadersTest(unittest.TestCase):
         self.assertEqual(miss.stdout.strip(), "")
         unknown = self.run_hot("check", str(listing), stdin="")
         self.assertEqual(unknown.returncode, 1)
+
+    def lists(self, committed, measured, weights_committed=None, weights_measured=None):
+        folder = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        args = []
+        for name, text in (("committed", committed), ("measured", measured), ("w1", weights_committed), ("w2", weights_measured)):
+            if text is not None:
+                (folder / name).write_text(text)
+                args.append(str(folder / name))
+        return self.run_hot("propose", *args, env={"GITHUB_RUN_ID": "77", "GITHUB_REPOSITORY": "o/r"})
+
+    def test_propose_says_the_list_is_current_within_the_tolerance(self):
+        result = self.lists("# c\nsrc/a.h\t46\nsrc/b.h\t31\n", "# m\nsrc/b.h\t33\nsrc/a.h\t44\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The committed list is current: the same 2 headers", result.stdout)
+        self.assertNotIn("Proposed", result.stdout)
+
+    def test_propose_names_what_moved_and_carries_the_measured_file(self):
+        result = self.lists("# c\nsrc/a.h\t46\nsrc/b.h\t31\nsrc/c.h\t30\n", "# m\nsrc/a.h\t47\nsrc/b.h\t42\nsrc/d.h\t35\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("| `src/b.h` | 31% | 42% |", out)
+        self.assertIn("| `src/c.h` | 30% | - |", out)
+        self.assertIn("| `src/d.h` | - | 35% |", out)
+        self.assertNotIn("`src/a.h`", out.split("<details>")[0])  # a.h moved by 1 point
+        self.assertIn("gh run download 77 -R o/r -n ci-measurements", out)
+        self.assertIn("```\n# m\nsrc/a.h\t47\nsrc/b.h\t42\nsrc/d.h\t35\n```", out)
+
+    def test_propose_reports_how_much_of_the_weights_are_known(self):
+        old = "0\t100\t0\tx/a.obj\t0\n0\t100\t0\tx/gone.obj\t0\n"
+        new = "0\t100\t0\tx/a.obj\t0\n0\t300\t0\tx/new.obj\t0\n"
+        result = self.lists("# c\n", "# m\n", old, new)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 object files measured, 2 in the committed file; 1 measured objects (75% of the compile time) are not in it, 1 of its objects no longer exist.", result.stdout)
 
 
 if __name__ == "__main__":

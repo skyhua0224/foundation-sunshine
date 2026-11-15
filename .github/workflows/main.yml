@@ -1083,8 +1083,10 @@ jobs:
           fi
 
       # The nightly build measures what the next split and the next header rule are built from: the compile time of every object file (the
-      # shards' ninja logs) and the share of it behind each header. Download the two files and commit them when they have moved
-      # (scripts/ci/shard-weights.ninja_log, scripts/ci/hot-headers.txt).
+      # shards' ninja logs) and the share of it behind each header. The job summary says whether the committed header list
+      # (scripts/ci/hot-headers.txt) is still current and, when it is not, shows what moved and the list to commit; the shard weights
+      # (scripts/ci/shard-weights.ninja_log) get a line on how much of the measured compile time they know. The two measured files are
+      # the artifact ci-measurements. The run changes nothing in the repository and opens nothing.
       - name: Download the shard ninja logs
         if: github.event_name == 'schedule' && needs.shard.result == 'success'
         continue-on-error: true
@@ -1101,7 +1103,8 @@ jobs:
           mkdir -p measurements
           python scripts/ci/merge-shard-weights.py measurements/shard-weights.ninja_log shard-ninja-logs/*/ninja_log.shard
           ninja -C build -t deps | python scripts/ci/hot-headers.py generate "$(cygpath -m "$GITHUB_WORKSPACE")" measurements/shard-weights.ninja_log 30 > measurements/hot-headers.txt
-          cat measurements/hot-headers.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          python scripts/ci/hot-headers.py propose scripts/ci/hot-headers.txt measurements/hot-headers.txt \
+            scripts/ci/shard-weights.ninja_log measurements/shard-weights.ninja_log | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the measurements
         if: github.event_name == 'schedule' && needs.shard.result == 'success'
