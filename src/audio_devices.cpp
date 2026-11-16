@@ -133,6 +133,30 @@ namespace audio_devices {
   }
 
   bool
+  looks_like_endpoint_id(std::string_view text) {
+    // {n.n.n.xxxxxxxx}.{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}: the endpoint part, a dot, the device guid
+    const auto is_hex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
+    const auto dot = text.find("}.{");
+    if (text.size() < 2 || text.front() != '{' || text.back() != '}' || dot == std::string_view::npos) return false;
+    const auto endpoint = text.substr(1, dot - 1);
+    const auto guid = text.substr(dot + 3, text.size() - dot - 4);
+    if (endpoint.empty() || guid.size() != 36) return false;
+    for (const char c : endpoint) {
+      if (c != '.' && !is_hex(c)) return false;
+    }
+    for (std::size_t i = 0; i < guid.size(); ++i) {
+      const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+      if (dash ? guid[i] != '-' : !is_hex(guid[i])) return false;
+    }
+    return true;
+  }
+
+  bool
+  is_virtual_output_kind(std::string_view kind) {
+    return kind == virtual_kind::vb_cable || kind == virtual_kind::vb_audio || kind == virtual_kind::steam_streaming;
+  }
+
+  bool
   is_vb_cable_driver(const driver_t &driver) {
     return equals(driver.name, "VB-Audio Virtual Cable");
   }

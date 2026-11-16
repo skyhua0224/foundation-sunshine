@@ -63,6 +63,16 @@ namespace audio_devices {
   std::string_view
   classify_virtual(const endpoint_t &endpoint);
 
+  /// Whether text is an MMDevice endpoint id such as {0.0.0.00000000}.{29dd7668-45b2-4846-882d-950f55bf7eb8}: what a setting stores for a
+  /// chosen device and what a person must never be shown instead of its name.
+  bool
+  looks_like_endpoint_id(std::string_view text);
+
+  /// Whether a word of classify_virtual is a device the host can use as its virtual output: VB-CABLE, another VB-Audio device
+  /// or Steam Streaming Speakers. The host's own virtual microphone is an input and does not count.
+  bool
+  is_virtual_output_kind(std::string_view kind);
+
   /**
    * @brief Whether the endpoint is the VB-CABLE the microphone backend uses.
    *
