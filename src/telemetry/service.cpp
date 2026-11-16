@@ -3,6 +3,8 @@
  * @brief The telemetry sender: buffer, queue, retry, consent, identity and stream trackers.
  */
 #include "service.h"
+#include "error_code.h"
+#include "opt_out.h"
 
 #include "src/crash/crash_context.h"
 
@@ -46,16 +48,6 @@ namespace telemetry {
     std::string
     sanitize_version(std::string_view version) {
       return safe_version(version);
-    }
-
-    std::uint32_t
-    fnv1a(const std::string &text) {
-      std::uint32_t h = 2166136261u;
-      for (unsigned char c : text) {
-        h ^= c;
-        h *= 16777619u;
-      }
-      return h;
     }
   }  // namespace
 
@@ -117,6 +109,18 @@ namespace telemetry {
       };
     }
     last_flush_ms_ = deps_.now_ms();
+    try {
+      std::ifstream seen(options_.dir / "products_seen.json");
+      const auto stored = seen ? json::parse(seen, nullptr, false) : json();
+      if (!stored.is_discarded() && stored.is_object()) {
+        for (const auto &[product, version] : stored.items())
+          if (known_product(product) && version.is_string() && products_seen_.size() < 4) products_seen_[product] = sanitize_version(version.get<std::string>());
+      }
+      std::ifstream pending(options_.dir / "opt_out_pending.jsonl");
+      if (pending) opt_outs_ = opt_out::parse(std::string { std::istreambuf_iterator<char> { pending }, std::istreambuf_iterator<char> {} });
+    }
+    catch (...) {
+    }
   }
 
   consent_t
@@ -206,10 +210,11 @@ namespace telemetry {
   // ---- events ----
 
   bool
-  service_t::emit(kind_e kind, std::string_view name, const json &props, std::string_view product, std::string_view version, int priority) {
+  service_t::emit(kind_e kind, std::string_view name, const json &props, std::string_view product, std::string_view version, int priority, std::string_view report_id) {
     try {
       if (!known_product(product)) return false;
-      if (!consent_now().allows(kind)) {
+      // a report the person pressed 发送 for is their consent for that one send: it does not wait for the error-report switch
+      if (!consent_now().allows(kind) && !is_user_report(kind, name)) {
         std::lock_guard lock { mutex_ };
         ++counts_.refused;
         return false;
@@ -219,6 +224,7 @@ namespace telemetry {
       shaped->product = std::string { product };
       shaped->version = sanitize_version(version);
       shaped->priority = priority;
+      if (is_user_report(kind, name)) shaped->report_id = std::string { report_id };
       bool wake = false;
       {
         std::lock_guard lock { mutex_ };
@@ -238,9 +244,31 @@ namespace telemetry {
     }
   }
 
+  bool
+  service_t::persist_report(const event_t &event) {
+    try {
+      // the identity was fixed when the report was accepted: nothing is looked up again (the switches may have changed since)
+      auto ctx = context();
+      const bool alone = event.report_install.empty();
+      ctx.install_id = alone ? event.report_id : event.report_install;
+      if (ctx.install_id.empty()) return false;
+      ctx.session_id = alone ? new_uuid_v4() : session_id_;
+      for (auto envelope : build_envelopes(ctx, event.product, { event })) {
+        if (alone) envelope["report_only"] = true;
+        std::lock_guard lock { queue_mutex_ };
+        if (!queue_.push(envelope, 0)) return false;
+      }
+      return true;
+    }
+    catch (const std::exception &) {
+      return false;
+    }
+  }
+
   std::size_t
   service_t::ingest(std::string_view product, std::string_view version, const json &events) {
     if (!events.is_array() || !known_product(product)) return 0;
+    note_product(product, version);
     std::size_t kept = 0, seen = 0;
     for (const auto &e : events) {
       if (++seen > MAX_BATCH_EVENTS) break;
@@ -256,22 +284,55 @@ namespace telemetry {
         if (id.rfind(prefix, 0) != 0) continue;
       }
       auto props = e.contains("props") ? e["props"] : json::object();
+      // both switches off: there is no install id (it is neither recovered nor created for this). The report gets a one-time random id of its own, used for its log and its batch, and the Worker takes it as a report without an install.
+      // the identity of the report is fixed here, once: the install id when there is one, else a one-time id. The log is uploaded under it and the batch is written with it, whatever the switches say a moment later.
+      std::string report_id, report_install;
+      if (name == "user_report") {
+        report_install = install_id();
+        if (report_install.empty()) report_id = new_uuid_v4();
+      }
       // a feedback report goes with the anonymised log of this session: uploaded first, its reference travels in the report. A page cannot name a reference itself.
       if (name == "user_report" && props.is_object()) {
         props.erase("log_ref");
-        // only while error reports are on (the report itself is refused otherwise), and only with the version the report will carry
-        if (deps_.session_log && consent_now().errors) {
+        // always: the run log is part of a feedback report, and pressing 发送 is the consent for it (whatever the error-report switch says); only with the version the report will carry
+        if (deps_.session_log) {
           try {
             const auto safe = safe_version(version);
             if (!safe.empty()) {
-              if (const auto ref = deps_.session_log(endpoint(), install_id(), safe)) props["log_ref"] = *ref;
+              if (const auto ref = deps_.session_log(endpoint(), report_id.empty() ? report_install : report_id, safe)) props["log_ref"] = *ref;
+              else if (deps_.session_log_state) props["log_state"] = deps_.session_log_state();  // the report goes without its log: the word says why
             }
           }
           catch (...) {
           }
         }
       }
-      if (emit(*kind, name, props, product, version)) ++kept;
+      if (name == "user_report") {
+        // a feedback report is on disk before the page is told it was accepted (the page shows success from this answer): it is written to the queue here, on this thread, and not left to the buffer that the sender
+        // thread swaps out. When the write fails the event stays in the buffer for the next flush and the page is told it was not kept.
+        auto shaped = shape_event(*kind, name, props, deps_.now_ms());
+        if (!shaped) continue;
+        shaped->product = std::string { product };
+        shaped->version = sanitize_version(version);
+        shaped->report_id = report_id;
+        shaped->report_install = report_install;
+        if (persist_report(*shaped)) {
+          std::lock_guard lock { mutex_ };
+          ++counts_.emitted;
+          ++kept;
+        }
+        else {
+          std::lock_guard lock { mutex_ };
+          ++counts_.write_failed;
+          ring_.push_back(std::move(*shaped));
+          while (ring_.size() > options_.ring_max) {
+            ring_.pop_front();
+            ++counts_.dropped;
+          }
+        }
+        continue;
+      }
+      if (emit(*kind, name, props, product, version, -1, report_id)) ++kept;
     }
     return kept;
   }
@@ -813,7 +874,7 @@ namespace telemetry {
   // ---- the log ----
 
   void
-  service_t::note_log(int severity, const char *message, std::size_t length, std::string_view component) noexcept {
+  service_t::note_log(int severity, const char *message, std::size_t length, std::string_view component, std::string_view site) noexcept {
     if (severity < 3) return;
     try {
       const auto hour = deps_.now_ms() / 3'600'000;
@@ -833,7 +894,7 @@ namespace telemetry {
           // the table is full: further distinct messages of an hour are only counted in the tally above
           return;
         }
-        found = raw_errors_.emplace(key, raw_error_t { std::string { component }, raw, severity >= 5 ? 5 : 4, 0 }).first;
+        found = raw_errors_.emplace(key, raw_error_t { std::string { component }, raw, severity >= 5 ? 5 : 4, 0, std::string { site.substr(0, 200) } }).first;
       }
       ++found->second.count;
       if (severity >= 5) found->second.severity = 5;
@@ -864,16 +925,20 @@ namespace telemetry {
       emit(kind_e::error, "log_summary", json { { "component", catalogue_id(component, 32).empty() ? "host" : catalogue_id(component, 32) }, { "fatal", w.fatal }, { "error", w.error }, { "warning", w.warning } });
     }
     for (const auto &[key, raw] : raws) {
-      // The line itself is not sent. Its code is a hash of the words it starts with, up to the first character that starts a value (a quote, a bracket, ':' '=' or a digit): the fixed text of the message, so the same error is one code and what a person chose is not in it.
-      std::string head;
-      for (const char c : scrub_log_message(raw.raw, MAX_MESSAGE_CHARS)) {
-        if (std::isdigit(static_cast<unsigned char>(c)) || c == ':' || c == '=' || c == '"' || c == '\'' || c == '[' || c == '(' || c == '{' || c == '<' || c == '/' || c == '\\') break;
-        head.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-      }
-      while (!head.empty() && head.back() == ' ') head.pop_back();
-      char code[16];
-      std::snprintf(code, sizeof(code), "e%08x", fnv1a(head));
+      // The line itself is not sent. Its code is a hash of the fixed words it starts with (src/telemetry/error_code.h): the same error is one code and what a person chose is not in it.
+      const auto code = error_code_of(scrub_log_message(raw.raw, MAX_MESSAGE_CHARS));
       emit(kind_e::error, "error", json { { "component", catalogue_id(raw.component, 32).empty() ? "host" : catalogue_id(raw.component, 32) }, { "code", code }, { "severity", raw.severity >= 5 ? "fatal" : "error" }, { "count", raw.count } });
+      // Every error and fatal log line has a site, so every code can be told where it comes from: the first line of a code in the hour becomes an error report with that site (the group of the
+      // Worker then has a place in the source, which the count alone never had). No text of the line goes with it. The reporter keeps its own hourly and per-install limits.
+      if (!raw.site.empty()) {
+        error_input_t input;
+        input.component = catalogue_id(raw.component, 32).empty() ? "host" : catalogue_id(raw.component, 32);
+        input.code = code;
+        input.severity = raw.severity >= 5 ? "fatal" : "error";
+        input.loc = clean_frame(raw.site);
+        if (!input.loc.empty()) input.frames.push_back(input.loc);
+        report_error(input);
+      }
     }
   }
 
@@ -907,20 +972,53 @@ namespace telemetry {
       const auto c = consent_now();
       // a batch holds events of one product and one priority, so the queue can drop, hold and send by priority
       std::map<std::pair<std::string, int>, std::vector<event_t>> by_product;
+      std::vector<event_t> alone;  // reports with an id of their own (both switches off): one batch each, with no install id and no session of the host
       for (auto &e : taken) {
-        if (!c.allows(e.kind)) continue;
+        if (!c.allows(e.kind) && !is_user_report(e.kind, e.name)) continue;
+        // a feedback report that reached the buffer without an identity (emitted directly, kept through a change of the switches): it gets one now, from the install id when there is one and a one-time id when there is not,
+        // and goes out on its own either way: it is never skipped for want of an install id
+        if (is_user_report(e.kind, e.name) && e.report_id.empty() && e.report_install.empty()) {
+          e.report_install = install_id();
+          if (e.report_install.empty()) e.report_id = new_uuid_v4();
+        }
+        if (!e.report_id.empty() || !e.report_install.empty()) {
+          alone.push_back(std::move(e));
+          continue;
+        }
         const auto priority = event_priority(e);
         by_product[{ e.product, priority }].push_back(std::move(e));
       }
-      if (by_product.empty()) return;
-      auto ctx = context();
-      ctx.install_id = install_id();
-      if (ctx.install_id.empty()) return;
-      ctx.session_id = session_id_;
-      for (const auto &[key, events] : by_product) {
-        for (const auto &envelope : build_envelopes(ctx, key.first, events)) {
-          std::lock_guard lock { queue_mutex_ };
-          queue_.push(envelope, key.second);
+      std::vector<event_t> failed;  // what could not be written: it goes back to the buffer, never lost to a failed write
+      for (const auto &e : alone)
+        if (!persist_report(e)) failed.push_back(e);
+      if (!by_product.empty()) {
+        auto ctx = context();
+        ctx.install_id = install_id();
+        ctx.session_id = session_id_;
+        for (auto &[key, events] : by_product) {
+          bool written = !ctx.install_id.empty();
+          try {
+            if (written) {
+              for (const auto &envelope : build_envelopes(ctx, key.first, events)) {
+                std::lock_guard lock { queue_mutex_ };
+                if (!queue_.push(envelope, key.second)) written = false;
+              }
+            }
+          }
+          catch (const std::exception &) {
+            written = false;
+          }
+          // no install id (both switches went off since): nothing to write for these, they are the automatic events of a choice that was turned off
+          if (!written && !ctx.install_id.empty()) failed.insert(failed.end(), events.begin(), events.end());
+        }
+      }
+      if (!failed.empty()) {
+        std::lock_guard lock { mutex_ };
+        counts_.write_failed += failed.size();
+        for (auto it = failed.rbegin(); it != failed.rend(); ++it) ring_.push_front(*it);
+        while (ring_.size() > options_.ring_max) {
+          ring_.pop_front();
+          ++counts_.dropped;
         }
       }
     }
@@ -1008,6 +1106,7 @@ namespace telemetry {
     int sent = 0;
     try {
       if (deps_.now_ms() < not_before_ms_) return 0;
+      send_opt_outs();
       const auto c = consent_now();
       // while the server asks for a wait only priority 0 may leave: one request per product and version in the wait, repeated events merged into one with their count; the rest stays in the queue under its caps
       if (backing_off()) {
@@ -1018,6 +1117,28 @@ namespace telemetry {
         }
         for (auto &e : entries) filter_by_consent(e.batch, c.usage, c.errors);
         entries.erase(std::remove_if(entries.begin(), entries.end(), [](const auto &e) { return e.batch["events"].empty(); }), entries.end());
+        // a feedback report is never merged with anything and never counted away: one request for each, as it was written (with its own install or one-time id), and only the file that was answered is removed. It does not wait for
+        // the group's turn either: the person pressed 发送 for it, and the rate cap per minute still holds.
+        const auto is_report = [](const disk_queue_t::entry_t &e) {
+          for (const auto &ev : e.batch["events"])
+            if (ev.value("name", "") == "user_report") return true;
+          return false;
+        };
+        if (const auto report = std::find_if(entries.begin(), entries.end(), is_report); report != entries.end()) {
+          const auto at = deps_.now_ms();
+          while (!post_times_.empty() && at - post_times_.front() >= 60'000) post_times_.pop_front();
+          if (static_cast<int>(post_times_.size()) >= options_.max_posts_per_minute) return 0;
+          post_times_.push_back(at);
+          post_result_t answer;
+          try {
+            if (deps_.post) answer = deps_.post(events_url(), report->batch.dump());
+          }
+          catch (...) {
+            answer = {};
+          }
+          if (handle_answer(answer, report->batch["events"].size(), { report->path }) && answer.status >= 200 && answer.status < 300) ++sent;
+          return sent;
+        }
         const auto group_of = [](const disk_queue_t::entry_t &e) { return e.batch.value("product", std::string {}) + "\n" + e.batch.value("version", std::string {}); };
         const auto now = deps_.now_ms();
         const auto first = std::find_if(entries.begin(), entries.end(), [&](const auto &e) {
@@ -1098,10 +1219,12 @@ namespace telemetry {
   void
   service_t::consent_changed() {
     try {
+      // before the install id goes: the record of a turned-off choice carries it; when it could not be saved the id stays on the computer (the next start finds the turn-off again and saves it)
+      const bool recorded = reconcile_consent();
       const auto c = consent_now();
       {
         std::lock_guard lock { mutex_ };
-        ring_.erase(std::remove_if(ring_.begin(), ring_.end(), [&](const event_t &e) { return !c.allows(e.kind); }), ring_.end());
+        ring_.erase(std::remove_if(ring_.begin(), ring_.end(), [&](const event_t &e) { return !c.allows(e.kind) && !is_user_report(e.kind, e.name); }), ring_.end());
       }
       if (!c.errors) {
         {
@@ -1116,15 +1239,177 @@ namespace telemetry {
       }
       std::lock_guard queue_lock { queue_mutex_ };
       if (!c.any()) {
-        queue_.clear();
+        // only the automatic events go; a feedback report the person sent and that is still waiting is theirs and stays (its batch keeps the id it was built with)
+        queue_.refilter(false, false);
+        if (recorded) {
+          std::lock_guard lock { mutex_ };
+          install_id_.clear();
+          std::error_code ec;
+          fs::remove(options_.dir / "install_id", ec);
+        }
+      }
+      else {
+        queue_.refilter(c.usage, c.errors);
+      }
+    }
+    catch (...) {
+    }
+  }
+
+
+  // ---- the record that a choice was turned off (opt_out.h) ----
+
+  namespace {
+    /** Writes `text` to `path` through a temporary file and a rename, so a crash leaves the old content or the new, never half of it. */
+    bool
+    write_file_atomic(const fs::path &path, const std::string &text) {
+      try {
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        auto temp = path;
+        temp += ".tmp";
+        {
+          std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+          out << text;
+          out.flush();
+          if (!out) return false;
+        }
+        fs::rename(temp, path, ec);
+        return !ec;
+      }
+      catch (...) {
+        return false;
+      }
+    }
+  }  // namespace
+
+  std::string
+  service_t::peek_install_id() {
+    {
+      std::lock_guard lock { mutex_ };
+      if (!install_id_.empty()) return install_id_;
+    }
+    std::ifstream in(options_.dir / "install_id");
+    std::string text;
+    if (in && std::getline(in, text)) {
+      while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' ')) text.pop_back();
+      if (opt_out::is_uuid(text)) return text;
+    }
+    return {};
+  }
+
+  void
+  service_t::note_product(std::string_view product, std::string_view version) {
+    try {
+      const auto safe = sanitize_version(version);
+      if (product == "host" || safe.empty()) return;
+      std::lock_guard lock { opt_out_mutex_ };
+      auto &slot = products_seen_[std::string { product }];
+      if (slot == safe) return;
+      slot = safe;
+      json j = json::object();
+      for (const auto &[p, v] : products_seen_) j[p] = v;
+      std::error_code ec;
+      fs::create_directories(options_.dir, ec);
+      write_file_atomic(options_.dir / "products_seen.json", j.dump());
+    }
+    catch (...) {
+    }
+  }
+
+  bool
+  service_t::reconcile_consent() {
+    try {
+      const auto c = consent_now();
+      opt_out::state_t before;
+      {
+        std::ifstream in(options_.dir / "consent_state.json");
+        const auto stored = in ? json::parse(in, nullptr, false) : json();
+        if (!stored.is_discarded()) before = opt_out::state_from_json(stored);
+      }
+      const auto off = opt_out::turned_off(before, c.usage, c.errors);
+      const bool changed = !before.known || before.usage != c.usage || before.errors != c.errors;
+      if (!off.empty()) {
+        // The record is saved before the new state is: a state that says "already off" without a saved record would lose the record for good (the next start would find nothing turned off).
+        const auto id = peek_install_id();
+        std::string host_version;
+        {
+          std::lock_guard lock { mutex_ };
+          host_version = sanitize_version(context_.version);
+        }
+        if (host_version.empty()) return false;  // the context is not set yet: telemetry.cpp calls this again once it is, and the state still says "on"
+        std::lock_guard lock { opt_out_mutex_ };
+        std::vector<opt_out::product_version_t> products { { "host", host_version } };
+        for (const auto &[p, v] : products_seen_) products.push_back({ p, v });
+        opt_out::add(opt_outs_, off, products, id, deps_.now_ms());
+        if (!write_file_atomic(options_.dir / "opt_out_pending.jsonl", opt_out::serialize(opt_outs_))) return false;  // not saved: the state is not committed, the next call tries again
+      }
+      if (changed && !write_file_atomic(options_.dir / "consent_state.json", opt_out::state_to_json({ true, c.usage, c.errors }).dump())) return false;
+      // both choices are off and every turn-off is saved (the record carries the number from now on): the number leaves the install; a retry of an earlier failure ends here too
+      if (!c.any()) {
         std::lock_guard lock { mutex_ };
         install_id_.clear();
         std::error_code ec;
         fs::remove(options_.dir / "install_id", ec);
       }
-      else {
-        queue_.refilter(c.usage, c.errors);
+      return true;
+    }
+    catch (...) {
+      return false;
+    }
+  }
+
+  void
+  service_t::send_opt_outs() {
+    try {
+      std::vector<opt_out::record_t> work;
+      {
+        std::lock_guard lock { opt_out_mutex_ };
+        if (opt_outs_.empty() && !opt_outs_unsaved_) return;
+        const auto before = opt_outs_.size();
+        const auto due = opt_out::due(opt_outs_, deps_.now_ms());
+        for (const auto i : due) work.push_back(opt_outs_[i]);
+        // records that are too old or were tried too often are dropped for good: the file (and the anonymous id in it) goes with them, even when nothing else is waiting. When the file cannot be
+        // written the pass is remembered as unsaved and repeated at the next one: the old id must not stay on the disk because one write failed.
+        if (opt_outs_.size() != before || opt_outs_unsaved_) opt_outs_unsaved_ = !write_file_atomic(options_.dir / "opt_out_pending.jsonl", opt_out::serialize(opt_outs_));
       }
+      if (work.empty()) return;
+      std::vector<opt_out::record_t> done_or_dropped, failed_now;
+      for (auto &r : work) {
+        // the same pacing as every other request
+        const auto at = deps_.now_ms();
+        while (!post_times_.empty() && at - post_times_.front() >= 60'000) post_times_.pop_front();
+        if (static_cast<int>(post_times_.size()) >= options_.max_posts_per_minute) break;
+        post_times_.push_back(at);
+        const auto body = opt_out::body_of(r, new_uuid_v4());
+        if (body.is_null()) {
+          done_or_dropped.push_back(r);
+          continue;
+        }
+        post_result_t answer;
+        try {
+          if (deps_.post) answer = deps_.post(events_url(), body.dump());
+        }
+        catch (...) {
+          answer = {};
+        }
+        // delivered, or refused for good (a 4xx other than 408/429): the record is done; anything else is tried again later
+        if ((answer.status >= 200 && answer.status < 300) || (answer.status >= 400 && answer.status < 500 && answer.status != 408 && answer.status != 429)) done_or_dropped.push_back(r);
+        else {
+          opt_out::failed(r, deps_.now_ms());
+          failed_now.push_back(r);
+        }
+      }
+      std::lock_guard lock { opt_out_mutex_ };
+      const auto same = [](const opt_out::record_t &a, const opt_out::record_t &b) { return a.choice == b.choice && a.product == b.product && a.install_id == b.install_id; };
+      opt_outs_.erase(std::remove_if(opt_outs_.begin(), opt_outs_.end(), [&](const auto &r) { return std::any_of(done_or_dropped.begin(), done_or_dropped.end(), [&](const auto &d) { return same(r, d); }); }), opt_outs_.end());
+      for (auto &r : opt_outs_)
+        for (const auto &f : failed_now)
+          if (same(r, f)) {
+            r.tries = f.tries;
+            r.next_try_ms = f.next_try_ms;
+          }
+      opt_outs_unsaved_ = !write_file_atomic(options_.dir / "opt_out_pending.jsonl", opt_out::serialize(opt_outs_));
     }
     catch (...) {
     }

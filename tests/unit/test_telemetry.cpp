@@ -47,6 +47,7 @@ namespace {
     double random_value = 0.0;  ///< what the random source answers: the Tier 1 draw of a stream and the jitter of a backoff
     std::optional<std::string> log_ref;  ///< what the session log upload returns
     int log_calls = 0;
+    std::vector<std::string> log_ids;  ///< the install id (or the one-time report id) each session log upload was made under
     std::unique_ptr<service_t> svc;
 
     explicit harness_t(service_options_t options = {}, double tier1_rate = 1.0) {
@@ -56,8 +57,9 @@ namespace {
       deps.now_ms = [this] { return now; };
       deps.consent = [this] { return consent; };
       deps.random01 = [this] { return random_value; };
-      deps.session_log = [this](const std::string &, const std::string &, const std::string &) {
+      deps.session_log = [this](const std::string &, const std::string &id, const std::string &) {
         ++log_calls;
+        log_ids.push_back(id);
         return log_ref;
       };
       deps.post = [this](const std::string &url, const std::string &body) {
@@ -663,6 +665,30 @@ TEST(TelemetryLog, HourlySummaryAndScrubbedErrors) {
   }
 }
 
+TEST(TelemetryLog, TheFirstLineOfACodeBecomesAnErrorReportWithItsSiteAndNoText) {
+  harness_t h;
+  const std::string line = "Download failed or rejected [https://cdn.example/steam/apps/1/header.jpg, code:23] for client \"Zed's laptop\"";
+  h.svc->note_log(4, line.c_str(), line.size(), "host", "src/httpcommon.cpp:838:download");
+  h.svc->note_log(4, line.c_str(), line.size(), "host", "src/httpcommon.cpp:838:download");
+  const std::string other = "Failed to create display for: <name>";
+  h.svc->note_log(4, other.c_str(), other.size(), "host", "");  // a line without a site: only the count
+  h.svc->flush(true);
+  h.svc->pump();
+  std::vector<json> reports;
+  json code_of_error;
+  for (const auto &b : h.posted)
+    for (const auto &e : b["events"]) {
+      if (e["name"] == "error_report") reports.push_back(e);
+      if (e["name"] == "error" && e["props"]["count"] == 2) code_of_error = e;
+    }
+  ASSERT_EQ(reports.size(), 1u);
+  ASSERT_FALSE(code_of_error.is_null());
+  EXPECT_EQ(reports[0]["props"]["code"], code_of_error["props"]["code"]);  // the report and the count are one group
+  EXPECT_EQ(reports[0]["props"]["loc"], "src/httpcommon.cpp:838:download");
+  const auto text = reports[0].dump();
+  for (const char *planted : { "cdn.example", "Zed", "laptop", "header.jpg" }) EXPECT_EQ(text.find(planted), std::string::npos) << planted;
+}
+
 TEST(TelemetryLog, ErrorCodeIsStableAcrossNamesAndPaths) {
   harness_t h;
   const std::string a = "Failed to open \"Alice's iPad\" at C:\\Users\\Alice\\x.mp4", b = "Failed to open \"Bob's phone\" at /home/bob/y.mp4";
@@ -849,7 +875,18 @@ TEST(TelemetryWorkerRules, UpdateSourceAndErrorCodes) {
   const auto start = shape_event(kind_e::usage, "app_start", json { { "cold", true }, { "update_source", "mirror" } }, 0);
   ASSERT_TRUE(start);
   EXPECT_EQ(start->props["update_source"], "mirror");
-  EXPECT_EQ(shape_event(kind_e::usage, "app_start", json { { "update_source", "cnb" } }, 0)->props["update_source"], "other");
+  // four sources; anything else is dropped to the fallback word
+  EXPECT_EQ(shape_event(kind_e::usage, "app_start", json { { "update_source", "cnb" } }, 0)->props["update_source"], "cnb");
+  EXPECT_EQ(shape_event(kind_e::usage, "app_start", json { { "update_source", "github" } }, 0)->props["update_source"], "github");
+  // why the chosen source was not used: five words
+  for (const char *miss : { "version_lag", "cdk_invalid", "quota", "network", "no_cdk" }) {
+    const auto with_miss = shape_event(kind_e::usage, "app_start", json { { "update_source", "cnb" }, { "update_source_miss", miss } }, 0);
+    ASSERT_TRUE(with_miss) << miss;
+    EXPECT_EQ(with_miss->props["update_source_miss"], miss);
+  }
+  const auto bogus_miss = shape_event(kind_e::usage, "app_start", json { { "update_source", "cnb" }, { "update_source_miss", "bing" } }, 0);
+  ASSERT_TRUE(bogus_miss);
+  EXPECT_FALSE(bogus_miss->props.contains("update_source_miss"));
   const auto e = shape_event(kind_e::error, "error", json { { "component", "stream" }, { "code", "E_DXGI_LOST" }, { "severity", "info" } }, 0);
   ASSERT_TRUE(e);
   EXPECT_EQ(e->props["code"], "E_DXGI_LOST");  // the case is kept
@@ -1004,7 +1041,7 @@ TEST(TelemetryUserReport, ShapeFollowsTheContract) {
   ASSERT_TRUE(e);
   EXPECT_EQ(e->kind, kind_e::error);
   EXPECT_EQ(e->props["category"], "performance");
-  EXPECT_FALSE(e->props.contains("contact"));  // no contact field exists on purpose
+  EXPECT_EQ(e->props["contact"], "me@example.org");  // what a person left on purpose to be answered is kept as they wrote it (it is not scrubbed)
   EXPECT_EQ(e->props["attachment"], att);
   EXPECT_EQ(e->props["error_code"], "E_DXGI_LOST");
   const auto message = e->props["message"].get<std::string>();
@@ -1032,22 +1069,47 @@ TEST(TelemetryUserReport, CategoryAndAttachmentAreChecked) {
   EXPECT_FALSE(base(json { { "error_code", "has space" } })->props.contains("error_code"));
 }
 
-TEST(TelemetryUserReport, FollowsTheErrorReportChoice) {
+TEST(TelemetryUserReport, IsNotHeldBackByTheErrorReportChoice) {
+  // pressing 发送 is the person's consent for that one send: the error-report switch decides about the automatic reports, not about this one
   harness_t h;
   const json events = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "it broke" } } } } });
-  h.consent = { true, false };
-  EXPECT_EQ(h.svc->ingest("panel", "1.0", events), 0u);  // error reports off: refused
-  h.consent = { false, true };
+  h.consent = { true, false };  // usage on, error reports off
   EXPECT_EQ(h.svc->ingest("panel", "1.0", events), 1u);
   h.svc->flush();
   ASSERT_EQ(h.svc->pump(), 1);
   EXPECT_EQ(h.posted.at(0)["events"][0]["name"], "user_report");
-  // turned off while waiting: dropped
+  // the choice changes while the report waits: the report stays, the automatic error events of the same batch would not
+  h.consent = { false, true };
   h.svc->ingest("web", "1", events);
+  h.svc->emit(kind_e::error, "error", json { { "component", "x" }, { "code", "E_LOST" } });
   h.consent = { true, false };
   h.svc->consent_changed();
   h.svc->flush();
-  EXPECT_EQ(h.svc->pump(), 0);
+  ASSERT_EQ(h.svc->pump(), 1);
+  EXPECT_EQ(names_of({ h.posted.back() }), std::set<std::string> { "user_report" });
+}
+
+TEST(TelemetryUserReport, ContactIsOneLineKeptAsTheyWroteItAndCutAtTwoHundredCharacters) {
+  const auto base = [](const json &contact) {
+    json p { { "category", "bug" }, { "component", "web" }, { "message", "m" } };
+    if (!contact.is_null()) p["contact"] = contact;
+    return shape_event(kind_e::error, "user_report", p, 0);
+  };
+  // not scrubbed: an address they gave is what it is for; control characters and runs of blanks become one space
+  EXPECT_EQ(base("  me@example.org \n QQ\t12345  ")->props["contact"], "me@example.org QQ 12345");
+  EXPECT_EQ(base(std::string(300, 'x'))->props["contact"].get<std::string>().size(), MAX_USER_CONTACT_CHARS);
+  EXPECT_EQ(base(std::string(150, 'x') + "\xe4\xb8\xad" + std::string(100, 'y'))->props["contact"].get<std::string>().substr(150, 3), "\xe4\xb8\xad");  // a multi-byte character is never split
+  for (const json &none : { json(""), json("   \n"), json(12345), json(true), json::array() }) EXPECT_FALSE(base(none)->props.contains("contact")) << none.dump();
+  EXPECT_FALSE(base(nullptr)->props.contains("contact"));
+}
+
+TEST(TelemetryUserReport, TheQueueKeepsAReportWhenErrorReportsAreOff) {
+  json envelope { { "events", json::array({ json { { "kind", "error" }, { "name", "user_report" } }, json { { "kind", "error" }, { "name", "error" } }, json { { "kind", "usage" }, { "name", "app_start" } } }) } };
+  EXPECT_EQ(filter_by_consent(envelope, true, false), 2u);
+  EXPECT_EQ(envelope["events"][0]["name"], "user_report");
+  EXPECT_EQ(envelope["events"][1]["name"], "app_start");
+  json off { { "events", json::array({ json { { "kind", "error" }, { "name", "error" } } }) } };
+  EXPECT_EQ(filter_by_consent(off, true, false), 0u);
 }
 
 TEST(TelemetryUserReport, TheSessionLogGoesUpFirstAndItsReferenceTravelsInTheReport) {
@@ -1072,16 +1134,259 @@ TEST(TelemetryUserReport, TheSessionLogGoesUpFirstAndItsReferenceTravelsInTheRep
   EXPECT_EQ(h.log_calls, before);
 }
 
-TEST(TelemetryUserReport, NoLogIsUploadedWhileErrorReportsAreOffOrTheVersionIsNotAVersion) {
+TEST(TelemetryUserReport, TheLogGoesWithEveryReportWhateverTheErrorReportChoiceIsButNotUnderAPathAsVersion) {
   harness_t h;
   h.log_ref = "crash-2026-11/ur-0123456789abcdef01234567.log.gz";
   const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "it broke" } } } } });
-  h.consent = { true, false };  // error reports off: the report is refused and the log must not leave first
-  EXPECT_EQ(h.svc->ingest("web", "1", report), 0u);
-  EXPECT_EQ(h.log_calls, 0);
+  h.consent = { true, false };  // error reports off: the report and its log still go (pressing 发送 was the consent)
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 1u);
+  EXPECT_EQ(h.log_calls, 1);
+  h.svc->flush();
+  ASSERT_EQ(h.svc->pump(), 1);
+  EXPECT_EQ(h.posted.back()["events"][0]["props"]["log_ref"], *h.log_ref);
   h.consent = { false, true };
+  const auto before = h.log_calls;
   h.svc->ingest("web", "C:\\Users\\Alice\\build", report);  // a page-supplied version that is a path: the log is not uploaded under it
-  EXPECT_EQ(h.log_calls, 0);
+  EXPECT_EQ(h.log_calls, before);
+}
+
+TEST(TelemetryUserReport, WithBothSwitchesOffTheReportGoesOutWithAOneTimeIdAndNoInstallIdIsMade) {
+  harness_t h;
+  h.consent = { false, false };
+  h.log_ref = "crash-2026-11/ur-0123456789abcdef01234567.log.gz";
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "it broke" }, { "contact", "QQ 10086" } } } } });
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 1u);  // accepted only because it is on disk by now (the page shows success from this answer)
+  ASSERT_EQ(h.log_ids.size(), 1u);
+  const auto report_id = h.log_ids.front();
+  EXPECT_EQ(report_id.size(), 36u);  // the log is uploaded under the report's own id, so the Worker can tie the two
+  EXPECT_FALSE(std::filesystem::exists(h.dir.path / "install_id")) << "no install id is created for this report";
+  ASSERT_EQ(h.svc->pump(), 1);
+  const auto &batch = h.posted.at(0);
+  EXPECT_EQ(batch["install_id"], report_id);
+  EXPECT_TRUE(batch["report_only"].get<bool>());
+  EXPECT_NE(batch["session_id"], batch["install_id"]);
+  ASSERT_EQ(batch["events"].size(), 1u);
+  EXPECT_EQ(batch["events"][0]["name"], "user_report");
+  EXPECT_EQ(batch["events"][0]["props"]["log_ref"], *h.log_ref);
+  EXPECT_EQ(batch["events"][0]["props"]["contact"], "QQ 10086");
+  // an ordinary event never carries the flag, and with both switches off nothing else is sent
+  EXPECT_FALSE(h.svc->emit(kind_e::usage, "feature_used", json { { "feature", "a" } }));
+  EXPECT_FALSE(std::filesystem::exists(h.dir.path / "install_id"));
+}
+
+TEST(TelemetryUserReport, TwoReportsWithBothSwitchesOffGetTwoIdsAndTheLogFollowsEach) {
+  harness_t h;
+  h.consent = { false, false };
+  h.log_ref = "crash-2026-11/ur-0123456789abcdef01234567.log.gz";
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "again" } } } } });
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 1u);
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 1u);
+  ASSERT_EQ(h.log_ids.size(), 2u);
+  EXPECT_NE(h.log_ids[0], h.log_ids[1]) << "reports are not tied to one another or to an install";
+  h.log_ref.reset();  // the log could not be read: the report still goes, without a log
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 1u);
+  while (h.svc->pump() > 0) {}
+  ASSERT_EQ(h.posted.size(), 3u);
+  EXPECT_FALSE(h.posted.back()["events"][0]["props"].contains("log_ref"));
+}
+
+TEST(TelemetryUserReport, TurningTheLastSwitchOffKeepsAWaitingReportAndDropsTheAutomaticEvents) {
+  harness_t h;
+  h.consent = { true, true };
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "kept" } } } } });
+  h.svc->ingest("web", "1", report);
+  h.svc->emit(kind_e::usage, "feature_used", json { { "feature", "web.a" } }, "web", "1");
+  h.svc->flush();  // queued on disk, nothing sent yet
+  h.consent = { false, false };
+  h.svc->consent_changed();
+  h.consent = { false, true };  // the person may send what waits: the queue is read with errors on again
+  while (h.svc->pump() > 0) {}
+  const auto names = names_of(h.posted);
+  EXPECT_TRUE(names.count("user_report")) << "the report the person sent is still there";
+  EXPECT_FALSE(names.count("feature_used")) << "the automatic usage event was dropped with the choice";
+}
+
+namespace {
+  std::size_t
+  queue_files(const std::filesystem::path &dir) {
+    std::error_code ec;
+    std::size_t n = 0;
+    if (!std::filesystem::exists(dir / "queue", ec)) return 0;
+    for (const auto &f : std::filesystem::directory_iterator(dir / "queue", ec))
+      if (f.path().extension() == ".json") ++n;
+    return n;
+  }
+}  // namespace
+
+TEST(TelemetryUserReport, AReportIsOnDiskWhenTheAnswerIsGivenEvenWhileAnotherThreadKeepsFlushing) {
+  harness_t h;
+  h.consent = { false, true };
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "kept" } } } } });
+  // a guard, so that a failed assertion leaves through here as well: the thread is stopped and joined before the harness it uses goes away (a joinable thread that is destroyed ends the program)
+  struct flusher_t {
+    std::atomic<bool> stop { false };
+    std::thread thread;
+    explicit flusher_t(service_t &svc) : thread([this, &svc] {
+      while (!stop.load()) svc.flush(false);  // the sender thread swaps the buffer out all the time
+    }) {}
+    ~flusher_t() {
+      stop = true;
+      if (thread.joinable()) thread.join();
+    }
+  } flusher { *h.svc };
+  for (std::size_t i = 1; i <= 40; ++i) {
+    ASSERT_EQ(h.svc->ingest("web", "1", report), 1u);
+    // the process could end right here: the report must already be in the queue directory, not only in a buffer that another thread holds
+    EXPECT_GE(queue_files(h.dir.path), i) << "report " << i << " is not on disk when the page was told it was accepted";
+  }
+}
+
+TEST(TelemetryUserReport, WhenTheQueueCannotBeWrittenTheAnswerIsNotKeptAndTheReportStaysInTheBufferForTheNextFlush) {
+  harness_t h;
+  h.consent = { false, true };
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "later" } } } } });
+  const auto queue = h.dir.path / "queue";
+  std::filesystem::create_directories(queue);
+  namespace fs = std::filesystem;
+  fs::permissions(queue, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+  std::ofstream probe(queue / "probe");
+  if (probe) {  // a user that may write anywhere (root): the directory cannot be made unwritable, nothing to test
+    fs::permissions(queue, fs::perms::owner_all, fs::perm_options::replace);
+    GTEST_SKIP() << "the queue directory stays writable for this user";
+  }
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 0u) << "not written: the page must not be told it was kept";
+  EXPECT_EQ(queue_files(h.dir.path), 0u);
+  h.svc->flush(false);  // still not writable: the event is put back, not lost
+  EXPECT_EQ(queue_files(h.dir.path), 0u);
+  fs::permissions(queue, fs::perms::owner_all, fs::perm_options::replace);
+  h.svc->flush(false);  // writable again: the held report is written now
+  EXPECT_EQ(queue_files(h.dir.path), 1u);
+  ASSERT_EQ(h.svc->pump(), 1);
+  EXPECT_EQ(h.posted.at(0)["events"][0]["props"]["message"], "later");
+}
+
+namespace {
+  // makes a queue directory that cannot be written; false when this user may write anywhere (nothing to test)
+  bool
+  lock_queue(const std::filesystem::path &dir) {
+    namespace fs = std::filesystem;
+    fs::create_directories(dir / "queue");
+    fs::permissions(dir / "queue", fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+    std::ofstream probe(dir / "queue" / "probe");
+    if (probe) {
+      fs::permissions(dir / "queue", fs::perms::owner_all, fs::perm_options::replace);
+      return false;
+    }
+    return true;
+  }
+  void
+  unlock_queue(const std::filesystem::path &dir) {
+    std::filesystem::permissions(dir / "queue", std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+  }
+}  // namespace
+
+TEST(TelemetryUserReport, TheIdentityIsFixedWhenTheReportIsAcceptedSoASwitchTurnedOffLaterDoesNotLoseIt) {
+  harness_t h;
+  h.consent = { false, true };
+  const json report = json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", "identity" } } } } });
+  if (!lock_queue(h.dir.path)) GTEST_SKIP() << "the queue directory stays writable for this user";
+  EXPECT_EQ(h.svc->ingest("web", "1", report), 0u);  // not written: it waits in the buffer, with the identity it was accepted under
+  const auto install = h.svc->install_id();
+  ASSERT_FALSE(install.empty());
+  h.consent = { false, false };  // the last switch goes off before the next flush: no install id can be had any more
+  h.svc->consent_changed();
+  unlock_queue(h.dir.path);
+  h.svc->flush(false);
+  EXPECT_EQ(queue_files(h.dir.path), 1u) << "the report is written with the identity it already had, not dropped for want of an install id";
+  ASSERT_EQ(h.svc->pump(), 1);
+  EXPECT_EQ(h.posted.at(0)["events"][0]["props"]["message"], "identity");
+  EXPECT_EQ(h.posted.at(0)["install_id"], install);
+}
+
+TEST(TelemetryUserReport, AReportKeptInTheBufferThroughTheLastSwitchGoingOffIsSentWithAOneTimeId) {
+  harness_t h;
+  h.consent = { true, true };
+  // a report in the buffer with no identity (emitted directly, as before the identity was fixed at acceptance), and then both switches go off
+  ASSERT_TRUE(h.svc->emit(kind_e::error, "user_report", json { { "category", "bug" }, { "component", "panel" }, { "message", "through the switches" } }, "panel", "1"));
+  ASSERT_TRUE(h.svc->emit(kind_e::usage, "feature_used", json { { "feature", "panel.a" } }, "panel", "1"));
+  h.consent = { false, false };
+  h.svc->consent_changed();
+  ASSERT_FALSE(std::filesystem::exists(h.dir.path / "install_id") && !h.svc->install_id().empty());
+  h.svc->flush(false);
+  EXPECT_EQ(queue_files(h.dir.path), 1u) << "the report is written (the automatic usage event went with the choice)";
+  h.consent = { false, true };
+  ASSERT_EQ(h.svc->pump(), 1);
+  const auto &batch = h.posted.at(0);
+  EXPECT_EQ(batch["events"][0]["name"], "user_report");
+  EXPECT_TRUE(batch["report_only"].get<bool>()) << "no install id exists: the one-time id stands in for it";
+  EXPECT_EQ(batch["events"].size(), 1u);
+}
+
+TEST(TelemetryUserReport, AFlushThatCannotWriteGivesTheAutomaticEventsBackToTheBufferToo) {
+  harness_t h;
+  h.consent = { true, true };
+  ASSERT_TRUE(h.svc->emit(kind_e::usage, "feature_used", json { { "feature", "web.apps_saved" } }, "web", "1"));
+  if (!lock_queue(h.dir.path)) GTEST_SKIP() << "the queue directory stays writable for this user";
+  h.svc->flush(false);
+  EXPECT_EQ(queue_files(h.dir.path), 0u);
+  unlock_queue(h.dir.path);
+  h.svc->flush(false);
+  EXPECT_EQ(queue_files(h.dir.path), 1u) << "the event went back to the buffer and is written now";
+}
+
+TEST(TelemetryUserReport, SeveralReportsDuringAWaitOfTheServerAllArriveEachOnItsOwn) {
+  harness_t h;
+  h.next_body = R"({"ok":true,"cfg":{"backoff_s":600}})";
+  ASSERT_TRUE(h.svc->emit(kind_e::usage, "app_start", json { { "cold", true } }));
+  h.svc->flush();
+  ASSERT_EQ(h.svc->pump(), 1);
+  ASSERT_TRUE(h.svc->backing_off());
+  h.posted.clear();
+  h.next_body.clear();
+  const auto one = [](const char *message) {
+    return json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", message } } } } });
+  };
+  // two with the same component and category (what the merging of a wait counts into one) and a third
+  EXPECT_EQ(h.svc->ingest("panel", "1", one("first")), 1u);
+  EXPECT_EQ(h.svc->ingest("panel", "1", one("second")), 1u);
+  EXPECT_EQ(h.svc->ingest("panel", "1", one("third")), 1u);
+  EXPECT_EQ(h.svc->queued_files(), 3u);
+  EXPECT_EQ(h.svc->pump(), 1);  // one request for each report, in the wait, not merged
+  EXPECT_EQ(h.svc->pump(), 1);
+  EXPECT_EQ(h.svc->pump(), 1);
+  ASSERT_EQ(h.posted.size(), 3u);
+  std::set<std::string> messages;
+  for (const auto &b : h.posted) {
+    ASSERT_EQ(b["events"].size(), 1u);
+    EXPECT_EQ(b["events"][0]["name"], "user_report");
+    EXPECT_FALSE(b["events"][0]["props"].contains("count"));
+    messages.insert(b["events"][0]["props"]["message"].get<std::string>());
+  }
+  EXPECT_EQ(messages, (std::set<std::string> { "first", "second", "third" }));
+  EXPECT_EQ(h.svc->queued_files(), 0u) << "each file is removed when its own request was answered";
+}
+
+TEST(TelemetryUserReport, ARefusedRequestInAWaitRemovesOnlyItsOwnFile) {
+  harness_t h;
+  h.next_body = R"({"ok":true,"cfg":{"backoff_s":600}})";
+  ASSERT_TRUE(h.svc->emit(kind_e::usage, "app_start", json { { "cold", true } }));
+  h.svc->flush();
+  ASSERT_EQ(h.svc->pump(), 1);
+  h.posted.clear();
+  h.next_body.clear();
+  const auto one = [](const char *message) {
+    return json::array({ json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "panel" }, { "message", message } } } } });
+  };
+  h.svc->ingest("panel", "1", one("a"));
+  h.svc->ingest("panel", "1", one("b"));
+  h.next_status = 503;  // the first request fails: it stays, and so does the other
+  EXPECT_EQ(h.svc->pump(), 0);
+  EXPECT_EQ(h.svc->queued_files(), 2u);
+  h.next_status = 200;
+  h.now += 700'000;
+  while (h.svc->pump() > 0) {}
+  EXPECT_EQ(h.svc->queued_files(), 0u);
+  EXPECT_EQ(h.posted.size() >= 2u, true);
 }
 
 TEST(TelemetryUserReport, LogRefIsOnlyTheReferenceOfTheUserLogEndpoint) {
@@ -1286,7 +1591,7 @@ TEST(TelemetryPrivacyGate, PlantedNamesPathsAddressesAndTokensNeverReachABatch) 
     json { { "kind", "usage" }, { "name", "setting_changed" }, { "props", json { { "key", "locale" }, { "value", "C:\\Users\\EvaSky" } } } },
     json { { "kind", "usage" }, { "name", "feature_used" }, { "props", json { { "feature", "EvaSky" } } } },
     json { { "kind", "usage" }, { "name", "setting_changed" }, { "props", json { { "key", "EvaSky" }, { "value", "x" } } } },
-    json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "web" }, { "message", typed }, { "contact", "eva.sky@example.com" } } } },
+    json { { "kind", "error" }, { "name", "user_report" }, { "props", json { { "category", "bug" }, { "component", "web" }, { "message", typed }, { "contact", "QQ 10086" } } } },
   });
   h.svc->ingest("web", "C:\\Users\\EvaSky", page);
   h.svc->flush(true);
@@ -1301,6 +1606,7 @@ TEST(TelemetryPrivacyGate, PlantedNamesPathsAddressesAndTokensNeverReachABatch) 
   for (const auto &secret : planted) EXPECT_EQ(all.find(secret), std::string::npos) << secret << " reached a batch, around: " << around(secret);
   EXPECT_EQ(all.find("EvaSky"), std::string::npos) << around("EvaSky");
   EXPECT_EQ(all.find("Users"), std::string::npos) << around("Users");
+  EXPECT_NE(all.find("QQ 10086"), std::string::npos) << "the contact a person left on purpose goes with the report";
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2366,6 +2672,290 @@ TEST(TelemetryScrub, ABracketHoldingBracketsEndsWhereTheOutermostOneCloses) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The record that a choice was turned off (src/telemetry/opt_out.h)
+
+namespace {
+  const std::string OPT_OUT_ID = "3f2b8a52-1c3e-4d0e-9d57-0a7c1f6b9e11";
+}
+
+TEST(OptOut, OnlyAChoiceThatWasOnAndIsOffCounts) {
+  using namespace telemetry::opt_out;
+  EXPECT_TRUE(turned_off(state_t { false, true, true }, false, false).empty());  // the first run only remembers
+  EXPECT_EQ(turned_off(state_t { true, true, true }, false, true), (std::vector<std::string> { "usage" }));
+  EXPECT_EQ(turned_off(state_t { true, true, true }, false, false), (std::vector<std::string> { "usage", "errors" }));
+  EXPECT_TRUE(turned_off(state_t { true, false, true }, false, true).empty());  // it was off already
+  EXPECT_TRUE(turned_off(state_t { true, false, false }, true, true).empty());  // turned on is not a record
+}
+
+TEST(OptOut, TheRecordCarriesTheChoiceTheProductAndTheVersionAndNothingElse) {
+  using namespace telemetry::opt_out;
+  std::vector<record_t> records;
+  add(records, { "errors" }, { { "host", "5.2.0.1.杂鱼" }, { "panel", "1.0.0" } }, OPT_OUT_ID, 1'800'000'000'000);
+  ASSERT_EQ(records.size(), 2u);
+  const auto body = body_of(records[1], "11111111-2222-4333-8444-555555555555");
+  ASSERT_TRUE(body.is_object());
+  EXPECT_EQ(body["install_id"], OPT_OUT_ID);
+  // nothing about the computer goes with it: the install, a fresh session number, the product, its version and the one event
+  for (const char *key : { "channel", "os", "os_version", "arch", "gpu_vendor", "locale" }) EXPECT_FALSE(body.contains(key)) << key;
+  std::set<std::string> keys;
+  for (const auto &[k, v] : body.items()) keys.insert(k);
+  EXPECT_EQ(keys, (std::set<std::string> { "v", "install_id", "session_id", "product", "version", "events" }));
+  EXPECT_EQ(body["product"], "panel");
+  EXPECT_EQ(body["version"], "1.0.0");
+  ASSERT_EQ(body["events"].size(), 1u);
+  EXPECT_EQ(body["events"][0]["name"], "opt_out");
+  EXPECT_EQ(body["events"][0]["props"], (json { { "choice", "errors" } }));
+  // the same turn-off twice is one record; a bad id makes none
+  add(records, { "errors" }, { { "host", "5.2.0.1.杂鱼" } }, OPT_OUT_ID, 1'800'000'001'000);
+  EXPECT_EQ(records.size(), 2u);
+  std::vector<record_t> none;
+  add(none, { "usage" }, { { "host", "1" } }, "", 1000);
+  EXPECT_TRUE(none.empty());
+}
+
+TEST(OptOut, ARecordIsRetriedWithGrowingGapsAndGivenUpOnAfterTwoWeeks) {
+  using namespace telemetry::opt_out;
+  std::vector<record_t> records;
+  add(records, { "usage" }, { { "host", "1" } }, OPT_OUT_ID, 1000);
+  EXPECT_EQ(due(records, 1000).size(), 1u);
+  failed(records[0], 1000);
+  EXPECT_TRUE(due(records, 1000 + 60'000).empty());
+  EXPECT_EQ(due(records, 1000 + RETRY_BASE_MS).size(), 1u);
+  failed(records[0], 1000);
+  EXPECT_EQ(records[0].next_try_ms, 1000 + 2 * RETRY_BASE_MS);
+  EXPECT_TRUE(due(records, 1000 + MAX_AGE_MS + 1).empty());
+  EXPECT_TRUE(records.empty());
+  // what is written to disk is read back, and a hostile file gives nothing it does not know
+  std::vector<record_t> again;
+  add(again, { "usage", "errors" }, { { "host", "1" }, { "web", "2" } }, OPT_OUT_ID, 5000);
+  const auto back = parse(serialize(again));
+  ASSERT_EQ(back.size(), 4u);
+  EXPECT_EQ(back[3].product, "web");
+  EXPECT_TRUE(parse("{\"v\":1,\"choice\":\"all\",\"product\":\"host\",\"version\":\"1\",\"install_id\":\"" + OPT_OUT_ID + "\",\"t\":1,\"next\":1,\"tries\":0}\nnot json\n").empty());
+}
+
+TEST(OptOutService, TurningAChoiceOffSendsOneRecordAndNothingAfterIt) {
+  harness_t h;
+  h.consent = consent_t { true, true };
+  h.svc->reconcile_consent();  // the first run: remembered, nothing to say
+  const auto id = h.svc->install_id();
+  ASSERT_EQ(id.size(), 36u);
+  // the panel has talked to this host
+  EXPECT_EQ(h.svc->ingest("panel", "1.0.0", json::array({ json { { "kind", "usage" }, { "name", "app_start" }, { "props", json { { "cold", true } } } } })), 1u);
+  h.consent = consent_t { false, true };
+  h.svc->consent_changed();
+  ASSERT_EQ(h.svc->pump(), 0);  // no ordinary batch
+  std::vector<json> records;
+  for (const auto &b : h.posted)
+    for (const auto &e : b["events"])
+      if (e["name"] == "opt_out") records.push_back(json { { "product", b["product"] }, { "version", b["version"] }, { "id", b["install_id"] }, { "props", e["props"] } });
+  ASSERT_EQ(records.size(), 2u);
+  for (const auto &r : records) {
+    EXPECT_EQ(r["id"], id);
+    EXPECT_EQ(r["props"], (json { { "choice", "usage" } }));
+  }
+  EXPECT_EQ(names_of(h.posted), (std::set<std::string> { "opt_out" }));
+  // delivered: nothing is sent again, and later events of the choice that is off stay unsent
+  h.posted.clear();
+  h.svc->pump();
+  EXPECT_TRUE(h.posted.empty());
+  EXPECT_FALSE(h.svc->emit(kind_e::usage, "app_start", json { { "cold", true } }));
+  // the other choice goes off too: its record, then the install id is gone
+  h.consent = consent_t { false, false };
+  h.svc->consent_changed();
+  h.svc->pump();
+  EXPECT_FALSE(h.posted.empty());
+  for (const auto &b : h.posted) EXPECT_EQ(b["events"][0]["props"], (json { { "choice", "errors" } }));
+  EXPECT_TRUE(h.svc->install_id().empty());
+}
+
+TEST(OptOutService, TheRecordIsSavedBeforeTheStateAndAnExpiredOneLeavesTheDisk) {
+  harness_t h;
+  h.consent = consent_t { true, true };
+  h.svc->reconcile_consent();
+  const auto id = h.svc->install_id();
+  const auto pending = h.dir.path / "opt_out_pending.jsonl";
+  const auto state = h.dir.path / "consent_state.json";
+  // no room to save the record (a directory stands where the file goes): the state must still say "on", so the next call finds the turn-off again
+  std::filesystem::create_directories(pending);
+  h.consent = consent_t { false, true };
+  h.svc->consent_changed();
+  EXPECT_EQ(json::parse(std::ifstream(state))["usage"], true);
+  std::filesystem::remove_all(pending);
+  h.svc->reconcile_consent();
+  EXPECT_TRUE(std::filesystem::is_regular_file(pending));
+  EXPECT_EQ(json::parse(std::ifstream(state))["usage"], false);
+  // the record is delivered: the file is empty, not left with the id in it
+  h.svc->pump();
+  EXPECT_EQ(std::filesystem::file_size(pending), 0u);
+  // a record that was never delivered is dropped after two weeks, and the file goes with it even though nothing else is waiting
+  h.next_status = 503;
+  h.consent = consent_t { false, false };
+  h.svc->reconcile_consent();
+  h.svc->pump();
+  EXPECT_GT(std::filesystem::file_size(pending), 0u);
+  h.now += telemetry::opt_out::MAX_AGE_MS + 60'000;
+  h.svc->pump();
+  EXPECT_EQ(std::filesystem::file_size(pending), 0u);
+  EXPECT_EQ(std::ifstream(pending).peek(), std::ifstream::traits_type::eof());
+  (void) id;
+}
+
+TEST(OptOutService, BothChoicesOffWithTheRecordNotSavedKeepsTheNumberUntilAFreshStartSavesIt) {
+  harness_t h;
+  h.consent = consent_t { true, true };
+  h.svc->reconcile_consent();
+  const auto id = h.svc->install_id();
+  ASSERT_EQ(id.size(), 36u);
+  const auto pending = h.dir.path / "opt_out_pending.jsonl";
+  std::filesystem::create_directories(pending);  // the file cannot be written
+  h.consent = consent_t { false, false };
+  h.svc->consent_changed();
+  EXPECT_TRUE(std::filesystem::exists(h.dir.path / "install_id"));  // the way back is kept
+  EXPECT_EQ(json::parse(std::ifstream(h.dir.path / "consent_state.json"))["usage"], true);  // and the state still says "on"
+  // the host ends (the memory with the record is lost), the problem is gone, a new service starts over the same folder with both choices off
+  const auto dir = h.dir.path;
+  h.svc.reset();
+  std::filesystem::remove_all(pending);
+  std::vector<json> posted;
+  service_deps_t deps;
+  std::int64_t now = h.now + 60'000;
+  deps.now_ms = [&] { return now; };
+  deps.consent = [] { return consent_t { false, false }; };
+  deps.post = [&](const std::string &, const std::string &body) {
+    posted.push_back(json::parse(body));
+    return post_result_t { 200 };
+  };
+  service_options_t options;
+  options.dir = dir;
+  service_t fresh(options, deps);
+  context_t c;
+  c.version = "5.2.0.1.杂鱼";
+  fresh.set_context(c);
+  EXPECT_TRUE(fresh.reconcile_consent());  // the turn-off of both is found again, saved, and then the number goes
+  EXPECT_FALSE(std::filesystem::exists(dir / "install_id"));
+  EXPECT_GT(std::filesystem::file_size(pending), 0u);
+  fresh.pump();
+  std::set<std::string> choices;
+  for (const auto &b : posted) {
+    EXPECT_EQ(b["install_id"], id);
+    choices.insert(b["events"][0]["props"]["choice"].get<std::string>());
+  }
+  EXPECT_EQ(choices, (std::set<std::string> { "usage", "errors" }));
+  EXPECT_EQ(std::filesystem::file_size(pending), 0u);
+}
+
+TEST(OptOutService, AFailedCleanupWriteIsRepeatedUntilTheFileIsEmpty) {
+  harness_t h;
+  h.consent = consent_t { true, true };
+  h.svc->reconcile_consent();
+  ASSERT_EQ(h.svc->install_id().size(), 36u);
+  const auto pending = h.dir.path / "opt_out_pending.jsonl";
+  h.next_status = 503;  // the record stays undelivered
+  h.consent = consent_t { false, true };
+  h.svc->consent_changed();
+  h.svc->pump();
+  ASSERT_GT(std::filesystem::file_size(pending), 0u);
+  // the write of the cleanup fails (the temporary file cannot be created): the record leaves the memory, the file keeps it for now
+  std::filesystem::create_directories(h.dir.path / "opt_out_pending.jsonl.tmp");
+  h.now += telemetry::opt_out::MAX_AGE_MS + 60'000;
+  h.svc->pump();
+  EXPECT_GT(std::filesystem::file_size(pending), 0u);
+  // the disk works again: the next pass writes the empty set although nothing is waiting
+  std::filesystem::remove_all(h.dir.path / "opt_out_pending.jsonl.tmp");
+  h.svc->pump();
+  EXPECT_EQ(std::filesystem::file_size(pending), 0u);
+}
+
+TEST(OptOutService, AnOfflineRecordWaitsAndAFirstRunWithTheChoiceOffSendsNothing) {
+  harness_t h;
+  h.consent = consent_t { true, true };
+  h.svc->reconcile_consent();
+  ASSERT_EQ(h.svc->install_id().size(), 36u);  // an install that never had an id never sent anything: there is nothing to say about it
+  h.next_status = 503;
+  h.consent = consent_t { true, false };
+  h.svc->consent_changed();
+  h.svc->pump();
+  ASSERT_FALSE(h.posted.empty());
+  const auto tries = h.posted.size();
+  h.svc->pump();
+  EXPECT_EQ(h.posted.size(), tries);  // not again right away
+  h.now += 11 * 60'000;
+  h.next_status = 200;
+  h.svc->pump();
+  EXPECT_EQ(h.posted.size(), tries + 1);
+  h.posted.clear();
+  h.now += 24 * 3600'000;
+  h.svc->pump();
+  EXPECT_TRUE(h.posted.empty());  // done
+  // a new install folder whose choices are off from the start says nothing
+  harness_t fresh;
+  fresh.consent = consent_t { false, false };
+  fresh.svc->reconcile_consent();
+  fresh.svc->pump();
+  EXPECT_TRUE(fresh.posted.empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The code of an error line (src/telemetry/error_code.h)
+
+#include "src/telemetry/error_code.h"
+
+TEST(ErrorCode, ApostropheInsideAWordIsPartOfTheWord) {
+  EXPECT_EQ(telemetry::error_head("Couldn't read packet: end of file"), "couldn't read packet");
+  EXPECT_EQ(telemetry::error_head("Couldn't accept incoming connections: aborted"), "couldn't accept incoming connections");
+  EXPECT_NE(telemetry::error_code_of("Couldn't read packet: x"), telemetry::error_code_of("Couldn't accept incoming connections: x"));
+  // an apostrophe that opens a value still ends the head
+  EXPECT_EQ(telemetry::error_head("Client 'Alice' refused"), "client");
+}
+
+TEST(ErrorCode, AComponentPrefixIsKeptSoItsMessagesStayApart) {
+  EXPECT_EQ(telemetry::error_head("NvEnc: NvEncOpenEncodeSessionEx() failed: 8"), "nvenc nvencopenencodesessionex");
+  EXPECT_NE(telemetry::error_code_of("NvEnc: NvEncOpenEncodeSessionEx() failed: 8"), telemetry::error_code_of("NvEnc: encoding format is not supported by the gpu, NVENCAPI_VERSION: 13"));
+  EXPECT_EQ(telemetry::error_head("Audio capture: failed to initialize microphone"), "audio capture failed to initialize microphone");
+  // a longer first part is a message, not a prefix: the colon ends the head; what follows (a reason from the system, often translated) is not part of the code
+  EXPECT_EQ(telemetry::error_head("Couldn't accept incoming connections: x: y"), "couldn't accept incoming connections");
+  EXPECT_EQ(telemetry::error_head("Failed to apply the profile: access denied"), "failed to apply the profile");
+}
+
+TEST(ErrorCode, ALeadingTagIsPartOfTheHeadAndNumbersAreNot) {
+  EXPECT_EQ(telemetry::error_head("[Display Init] Configured adapter [0x1] differs"), "display init configured adapter");
+  EXPECT_EQ(telemetry::error_head("[vdd_capture] failed to query IDXGIDevice for adapter LUID: 0x80070005"), "vdd_capture failed to query idxgidevice for adapter luid");
+  EXPECT_NE(telemetry::error_code_of("[A b] one"), telemetry::error_code_of("[A b] two"));
+  // a tag with digits or symbols is data, not a tag
+  EXPECT_EQ(telemetry::error_head("[0x7ff] oops"), "");
+  EXPECT_EQ(telemetry::error_head("[user@example] oops"), "");
+}
+
+TEST(ErrorCode, TheSameMessageWithOtherValuesIsTheSameCode) {
+  EXPECT_EQ(telemetry::error_code_of("Download failed or rejected [https://a/b.jpg, code:23] [src/x.cpp:838:f]"), telemetry::error_code_of("Download failed or rejected [https://c/d.png, code:35] [src/x.cpp:838:f]"));
+  EXPECT_EQ(telemetry::error_code_of("Failed to create display for: <name>"), telemetry::error_code_of("Failed to create display for: "));
+  EXPECT_EQ(telemetry::error_code_of("x").size(), 9u);
+}
+
+TEST(ErrorCode, ALongMessageWithMultiByteCharactersIsCutAtBytesNotCharacters) {
+  // 1 + 40 * 3 bytes, no space: the head is cut at 96 bytes, in the middle of a character
+  std::string no_space = "x";
+  for (int i = 0; i < 40; ++i) no_space += "错";
+  const auto head = telemetry::error_head(no_space);
+  EXPECT_EQ(head.size(), 96u);
+  // spaces: cut at 96 bytes, then back to the last space
+  std::string spaced = "加载失败";
+  for (int i = 0; i < 12; ++i) spaced += " 加载失败";
+  const auto spaced_head = telemetry::error_head(spaced);
+  EXPECT_LE(spaced_head.size(), 96u);
+  EXPECT_EQ(spaced_head.back() & 0x80, 0x80);  // it ends on the last whole word, not on a space
+  // the codes are pinned: scripts/telemetry/test_error_code_catalogue.py holds the same two values (the dictionary tool must agree with this function byte for byte)
+  EXPECT_EQ(telemetry::error_code_of(no_space), "ec2d441a4");
+  EXPECT_EQ(telemetry::error_code_of(spaced), "ed4859417");
+}
+
+TEST(ErrorCode, TheHeadIsBounded) {
+  const auto head = telemetry::error_head(std::string(300, 'a') + " " + std::string(300, 'b'));
+  EXPECT_LE(head.size(), 96u);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The service and the start-up: XP_SVC_CORE_RESTART and XP_SLOW_READY
 
 #include "src/telemetry/service_lifecycle.h"
@@ -2436,6 +3026,93 @@ TEST(ServiceLifecycle, ADeliberateRestartOfTheHostIsCountedButNotAProblem) {
   // asked by the service (a change of the session, a stop) it is not an exit of the core at all
   const auto asked = summarize(parse(life::core_exit_line(2000, 1, 100, -1, true) + "\n"));
   EXPECT_EQ(asked.exits, 0);
+}
+
+TEST(ServiceLifecycle, ARestartTheCoreAskedForIsCountedAndNeverAnAnomaly) {
+  // the Panel saves a setting: the core leaves its marker, exits with code 0 after twelve seconds and the service starts it again; four times in two minutes
+  std::string text = life::svc_start_line(1000) + "\n";
+  for (int i = 0; i < 4; ++i) {
+    text += life::core_start_line(2000 + i * 20'000, false, 10 + i, 0, i ? "core_exit" : "boot") + "\n";
+    text += life::core_exit_line(14'000 + i * 20'000, 0, 12'000, -1, false, true) + "\n";
+  }
+  const auto summary = summarize(parse(text));
+  EXPECT_EQ(summary.restarts_requested, 4);
+  EXPECT_EQ(summary.restart_reason, "api");  // none of these lines says why
+  EXPECT_EQ(summary.exits, 0);
+  EXPECT_EQ(summary.unexpected, 0);
+  EXPECT_EQ(summary.short_life, 0);
+  state_t state;
+  EXPECT_FALSE(judge_restart(summary, state, 1'000'000).has_value());
+  // the shaped event carries the count
+  EXPECT_TRUE(telemetry::shape_event(telemetry::kind_e::experience, "svc_lifecycle", summary_props(summary), 1000).has_value());
+  EXPECT_EQ(summary_props(summary).value("restarts_requested", -1), 4);
+  // the same exit without the note is the unrequested exit it always was
+  const auto without = summarize(parse(life::core_start_line(2000, false, 10, 0, "boot") + "\n" + life::core_exit_line(14'000, 0, 12'000, -1, false, false) + "\n"));
+  EXPECT_EQ(without.unexpected, 1);
+  EXPECT_EQ(without.restarts_requested, 0);
+  // a restart flag with an exit code of a crash is still a crash
+  const auto crashed = summarize(parse(life::core_exit_line(14'000, 0xC0000005ul, 12'000, -1, false, true) + "\n"));
+  EXPECT_EQ(crashed.restarts_requested, 0);
+  EXPECT_EQ(crashed.unexpected, 1);
+}
+
+TEST(ServiceLifecycle, TheReasonOfARequestedRestartTravelsFromTheCoreToTheEvent) {
+  const auto dir = std::filesystem::temp_directory_path() / "alk_restart_reason_test";
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "guide", 4242, 1'799'999'000'000));
+  std::string word;
+  ASSERT_TRUE(life::take_restart_request(dir, 101'000, 4242, 1'799'999'000'000, &word));
+  EXPECT_EQ(word, "guide");
+  std::filesystem::remove_all(dir);
+  const auto line = life::core_exit_line(101'000, 0, 12'000, -1, false, true, word);
+  const auto summary = summarize(parse(line + "\n"));
+  EXPECT_EQ(summary.restarts_requested, 1);
+  EXPECT_EQ(summary.restart_reason, "guide");
+  const auto props = summary_props(summary);
+  EXPECT_EQ(props.value("restart_reason", ""), "guide");
+  EXPECT_TRUE(telemetry::shape_event(telemetry::kind_e::experience, "svc_lifecycle", props, 1000).has_value());
+  // a word that is not on the list is "api", whatever a hostile file says
+  EXPECT_EQ(summarize(parse(life::core_exit_line(1, 0, 12'000, -1, false, true, "something else") + "\n")).restart_reason, "api");
+  EXPECT_EQ(summarize(parse(life::core_exit_line(1, 0, 12'000, -1, false, true, "tray") + "\n")).restart_reason, "tray");
+}
+
+TEST(ServiceLifecycle, TheStartOfTheCoreToItsWebInterfaceIsTimedWithoutTheService) {
+  state_t state;
+  const auto fast = judge_ready("core", 3'000, state, 1'000'000);
+  EXPECT_FALSE(fast.has_value());
+  EXPECT_EQ(state.core_ms.size(), 1u);
+  EXPECT_TRUE(state.svc_core_ms.empty());  // its own baseline
+  const auto props = timing_props("core", 3'000, false);
+  EXPECT_EQ(props["which"], "core");
+  EXPECT_TRUE(telemetry::shape_event(telemetry::kind_e::experience, "startup_timing", props, 1000).has_value());
+  const auto slow = judge_ready("core", 20'000, state, 2'000'000);
+  ASSERT_TRUE(slow.has_value());
+  EXPECT_EQ(slow->which, "core");
+  EXPECT_TRUE(telemetry::shape_event(telemetry::kind_e::experience, "host_anomaly", anomaly_props(*slow), 1000).has_value());
+  // the baseline survives a restart of the host
+  const auto back = state_from_json(state_to_json(state));
+  EXPECT_EQ(back.core_ms.size(), 2u);
+}
+
+TEST(ServiceLifecycle, TheRestartMarkerIsTakenOnceAndOnlyWhileItIsFresh) {
+  const auto dir = std::filesystem::temp_directory_path() / "alk_restart_marker_test";
+  std::filesystem::remove_all(dir);
+  EXPECT_FALSE(life::take_restart_request(dir, 100'000, 7, 5));  // nothing there
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "api", 7, 5));
+  EXPECT_TRUE(life::take_restart_request(dir, 101'500, 7, 5));
+  EXPECT_FALSE(life::take_restart_request(dir, 101'500, 7, 5));  // taken: gone
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "api", 7, 5));
+  EXPECT_FALSE(life::take_restart_request(dir, 100'000 + life::RESTART_MARKER_WINDOW_MS + 1, 7, 5));  // an old note of an earlier restart that never happened
+  EXPECT_FALSE(std::filesystem::exists(dir / life::RESTART_MARKER));  // and it is removed all the same
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "api", 7, 5));
+  EXPECT_FALSE(life::take_restart_request(dir, 90'000, 7, 5));  // an exit before the note was written is not this restart
+  // the note belongs to the core that wrote it: the exit of another core (another id, or the same id started later) does not take it, and it is gone afterwards
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "settings", 7, 5));
+  EXPECT_FALSE(life::take_restart_request(dir, 101'000, 8, 5));
+  EXPECT_FALSE(std::filesystem::exists(dir / life::RESTART_MARKER));
+  ASSERT_TRUE(life::note_restart_request(dir, 100'000, "settings", 7, 5));
+  EXPECT_FALSE(life::take_restart_request(dir, 101'000, 7, 6));
+  std::filesystem::remove_all(dir);
 }
 
 TEST(ServiceLifecycle, ACrashShortAfterTheStartIsAProblemAndItBecomesSevereWhenItRepeats) {
