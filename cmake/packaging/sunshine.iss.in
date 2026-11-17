@@ -48,8 +48,8 @@ OutputBaseFilename=Sunshine-engine
 ; https://jrsoftware.org/ishelp/index.php?topic=setup_lzmauseseparateprocess
 Compression=lzma2/ultra64
 SolidCompression=yes
-LZMANumBlockThreads=4
-LZMABlockSize=65536
+LZMANumBlockThreads=1
+LZMABlockSize=262144
 LZMAUseSeparateProcess=yes
 ; UI 设置
 SetupIconFile={#MyIconFile}
