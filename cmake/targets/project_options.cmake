@@ -14,8 +14,10 @@ if(WIN32 AND "$ENV{SUNSHINE_LTO}" MATCHES "^(gcc-lto|thinlto)$" AND CMAKE_BUILD_
         find_program(_lto_ranlib NAMES gcc-ranlib REQUIRED)
         set(CMAKE_AR "${_lto_ar}" CACHE FILEPATH "archiver with the LTO plugin" FORCE)
         set(CMAKE_RANLIB "${_lto_ranlib}" CACHE FILEPATH "ranlib with the LTO plugin" FORCE)
-        set(SUNSHINE_LTO_COMPILE_OPTIONS "-flto=auto;-Wa,-mbig-obj")
-        set(SUNSHINE_LTO_LINK_OPTIONS "-flto=auto;-Wa,-mbig-obj")
+        set(SUNSHINE_LTO_COMPILE_OPTIONS "-flto=auto;-ffat-lto-objects;-Wa,-mbig-obj")
+        # Without the linker plugin ld never sees two copies of the boost::wrapexcept thunks (the plugin path fails with
+        # "defined in discarded section .gnu.linkonce.t"); the objects then have to carry native code too (-ffat-lto-objects).
+        set(SUNSHINE_LTO_LINK_OPTIONS "-flto=auto;-fno-use-linker-plugin;-Wa,-mbig-obj")
     elseif(_lto_mode STREQUAL "thinlto" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # Fat objects keep GNU ar able to index the static libraries (the pinned Clang set has no llvm-ar); lld takes the
         # bitcode section for ThinLTO. ICF "safe" folds only functions whose address is not significant.
