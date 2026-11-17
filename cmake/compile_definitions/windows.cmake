@@ -9,7 +9,7 @@ enable_language(RC)
 # gives every module a CodeView GUID that survives stripping and signing: the key between a minidump and its symbols.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     foreach(lang C CXX)
-        string(APPEND CMAKE_${lang}_FLAGS_RELEASE " -g1")
+        string(APPEND CMAKE_${lang}_FLAGS_RELEASE " -g1 -Os")
     endforeach()
     foreach(kind EXE SHARED MODULE)
         string(APPEND CMAKE_${kind}_LINKER_FLAGS " -Wl,--build-id")
