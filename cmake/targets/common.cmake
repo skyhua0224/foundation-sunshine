@@ -2,6 +2,10 @@
 # this file will also load platform specific macros
 
 add_executable(sunshine "${CMAKE_SOURCE_DIR}/src/main.cpp")
+if(MINGW)
+    # ci-size-experiment-20261118: link map of the main executable, uploaded by the workflow. Not meant for the upstream branch.
+    target_link_options(sunshine PRIVATE LINKER:-Map=${CMAKE_BINARY_DIR}/sunshine.map)
+endif()
 include(${CMAKE_MODULE_PATH}/dependencies/mat_capture.cmake)
 if (TARGET sunshine_mat_capture)
     add_dependencies(sunshine sunshine_mat_capture)

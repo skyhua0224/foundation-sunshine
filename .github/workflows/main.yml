@@ -1160,6 +1160,21 @@ jobs:
             fi
           fi
 
+      - name: Pack the link map (size experiment)
+        shell: msys2 {0}
+        run: |
+          ls -l build/sunshine.map
+          xz -T0 -6 -k build/sunshine.map
+          ls -l build/sunshine.map.xz
+          ls -l build/sunshine.exe
+
+      - name: Upload the link map (size experiment)
+        uses: actions/upload-artifact@v7
+        with:
+          name: size-map-r${{ github.run_number }}
+          path: build/sunshine.map.xz
+          if-no-files-found: error
+
       - name: Compiler cache size
         if: always()
         shell: msys2 {0}
