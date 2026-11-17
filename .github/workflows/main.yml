@@ -53,6 +53,14 @@ on:
         options:
           - 'clang'
           - 'gcc'
+      lto:
+        description: 'Experiment: link-time optimisation of the Windows build (gcc-lto with GCC, thinlto with Clang)'
+        type: choice
+        default: none
+        options:
+          - 'none'
+          - 'gcc-lto'
+          - 'thinlto'
       rtx_hdr:
         description: 'RTX HDR support for development branches (official master always requires ON)'
         type: choice
@@ -80,6 +88,7 @@ env:
   # not faster and Clang's compiler cache is substantially larger. Releases
   # use Clang unless the CI_TOOLCHAIN repository variable or manual input asks
   # for GCC.
+  SUNSHINE_LTO: ${{ inputs.lto || 'none' }}
   TOOLCHAIN: ${{ inputs.toolchain || (github.event_name == 'pull_request' && 'gcc') || vars.CI_TOOLCHAIN || 'clang' }}
 
 jobs:

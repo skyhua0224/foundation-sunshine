@@ -1,5 +1,37 @@
 include_guard(GLOBAL)
 
+# ci-lto-experiment-20261117: link-time optimisation for the GCC/Clang comparison. The mode comes from the environment of the CI job
+# (SUNSHINE_LTO = gcc-lto | thinlto; anything else leaves the build untouched), so no workflow invocation line changes. Windows
+# (MinGW) Release builds only. Not meant for the upstream branch.
+if(WIN32 AND "$ENV{SUNSHINE_LTO}" MATCHES "^(gcc-lto|thinlto)$" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(_lto_mode "$ENV{SUNSHINE_LTO}")
+    if(_lto_mode STREQUAL "gcc-lto" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # Slim LTO objects need the plugin-aware archiver; -flto=auto spreads the LTRANS partitions over all processors.
+        find_program(_lto_ar NAMES gcc-ar REQUIRED)
+        find_program(_lto_ranlib NAMES gcc-ranlib REQUIRED)
+        set(CMAKE_AR "${_lto_ar}" CACHE FILEPATH "archiver with the LTO plugin" FORCE)
+        set(CMAKE_RANLIB "${_lto_ranlib}" CACHE FILEPATH "ranlib with the LTO plugin" FORCE)
+        foreach(_lang C CXX)
+            string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=auto")
+        endforeach()
+        foreach(_kind EXE SHARED MODULE)
+            string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=auto")
+        endforeach()
+    elseif(_lto_mode STREQUAL "thinlto" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        # Fat objects keep GNU ar able to index the static libraries (the pinned Clang set has no llvm-ar); lld takes the
+        # bitcode section for ThinLTO. ICF "safe" folds only functions whose address is not significant.
+        foreach(_lang C CXX)
+            string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=thin -ffat-lto-objects")
+        endforeach()
+        foreach(_kind EXE SHARED MODULE)
+            string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=thin -Wl,--fat-lto-objects -Wl,--icf=safe")
+        endforeach()
+    else()
+        message(FATAL_ERROR "SUNSHINE_LTO=${_lto_mode} does not match the compiler ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    message(STATUS "LTO experiment: ${_lto_mode}")
+endif()
+
 # Require the selected standard rather than silently accepting an older dialect.
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SUNSHINE_TESTS_ENABLE_COVERAGE "Enable gcov coverage instrumentation for tests" OFF)
