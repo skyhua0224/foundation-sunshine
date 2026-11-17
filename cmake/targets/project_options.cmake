@@ -16,8 +16,10 @@ if(WIN32 AND "$ENV{SUNSHINE_LTO}" MATCHES "^(gcc-lto|thinlto)$" AND CMAKE_BUILD_
         foreach(_lang C CXX)
             string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=auto -Wa,-mbig-obj")
         endforeach()
+        # One LTRANS partition: with the balanced partitions, linkonce thunks of boost::wrapexcept land in several partitions and ld
+        # stops with multiple definitions (MinGW). The assembler option must be on the link line too, or lto-wrapper drops it.
         foreach(_kind EXE SHARED MODULE)
-            string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=auto")
+            string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=auto -flto-partition=one -Wa,-mbig-obj")
         endforeach()
     elseif(_lto_mode STREQUAL "thinlto" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # Fat objects keep GNU ar able to index the static libraries (the pinned Clang set has no llvm-ar); lld takes the
