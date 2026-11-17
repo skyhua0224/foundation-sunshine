@@ -11,8 +11,10 @@ if(WIN32 AND "$ENV{SUNSHINE_LTO}" MATCHES "^(gcc-lto|thinlto)$" AND CMAKE_BUILD_
         find_program(_lto_ranlib NAMES gcc-ranlib REQUIRED)
         set(CMAKE_AR "${_lto_ar}" CACHE FILEPATH "archiver with the LTO plugin" FORCE)
         set(CMAKE_RANLIB "${_lto_ranlib}" CACHE FILEPATH "ranlib with the LTO plugin" FORCE)
+        # lto-wrapper drops every -Wa option when the objects disagree on them (some targets add -Wa,-mbig-obj, third-party ones
+        # do not) and lto1 then stops with "COFF object format mismatch": every object gets the same assembler option.
         foreach(_lang C CXX)
-            string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=auto")
+            string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=auto -Wa,-mbig-obj")
         endforeach()
         foreach(_kind EXE SHARED MODULE)
             string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=auto")
