@@ -6,21 +6,16 @@ include_guard(GLOBAL)
 if(WIN32 AND "$ENV{SUNSHINE_LTO}" MATCHES "^(gcc-lto|thinlto)$" AND CMAKE_BUILD_TYPE STREQUAL "Release")
     set(_lto_mode "$ENV{SUNSHINE_LTO}")
     if(_lto_mode STREQUAL "gcc-lto" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        # Slim LTO objects need the plugin-aware archiver; -flto=auto spreads the LTRANS partitions over all processors.
+        # Slim LTO objects need the plugin-aware archiver. The LTO flags go on the project targets only (sunshine_project_options):
+        # with every Boost object built with -flto too, ld stops with multiple definitions of the linkonce thunks of
+        # boost::wrapexcept (MinGW). -Wa,-mbig-obj on every LTO object and on the link line, or lto-wrapper drops it and lto1
+        # reports a COFF object format mismatch.
         find_program(_lto_ar NAMES gcc-ar REQUIRED)
         find_program(_lto_ranlib NAMES gcc-ranlib REQUIRED)
         set(CMAKE_AR "${_lto_ar}" CACHE FILEPATH "archiver with the LTO plugin" FORCE)
         set(CMAKE_RANLIB "${_lto_ranlib}" CACHE FILEPATH "ranlib with the LTO plugin" FORCE)
-        # lto-wrapper drops every -Wa option when the objects disagree on them (some targets add -Wa,-mbig-obj, third-party ones
-        # do not) and lto1 then stops with "COFF object format mismatch": every object gets the same assembler option.
-        foreach(_lang C CXX)
-            string(APPEND CMAKE_${_lang}_FLAGS_RELEASE " -flto=auto -Wa,-mbig-obj")
-        endforeach()
-        # One LTRANS partition: with the balanced partitions, linkonce thunks of boost::wrapexcept land in several partitions and ld
-        # stops with multiple definitions (MinGW). The assembler option must be on the link line too, or lto-wrapper drops it.
-        foreach(_kind EXE SHARED MODULE)
-            string(APPEND CMAKE_${_kind}_LINKER_FLAGS_RELEASE " -flto=auto -flto-partition=one -Wa,-mbig-obj")
-        endforeach()
+        set(SUNSHINE_LTO_COMPILE_OPTIONS "-flto=auto;-Wa,-mbig-obj")
+        set(SUNSHINE_LTO_LINK_OPTIONS "-flto=auto;-Wa,-mbig-obj")
     elseif(_lto_mode STREQUAL "thinlto" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         # Fat objects keep GNU ar able to index the static libraries (the pinned Clang set has no llvm-ar); lld takes the
         # bitcode section for ThinLTO. ICF "safe" folds only functions whose address is not significant.
@@ -44,6 +39,10 @@ add_library(sunshine_project_options INTERFACE)
 target_compile_features(sunshine_project_options INTERFACE cxx_std_23)
 if(MINGW)
     target_link_options(sunshine_project_options INTERFACE -static)
+    if(DEFINED SUNSHINE_LTO_COMPILE_OPTIONS)
+        target_compile_options(sunshine_project_options INTERFACE "$<$<CONFIG:Release>:${SUNSHINE_LTO_COMPILE_OPTIONS}>")
+        target_link_options(sunshine_project_options INTERFACE "$<$<CONFIG:Release>:${SUNSHINE_LTO_LINK_OPTIONS}>")
+    endif()
     target_compile_options(sunshine_project_options INTERFACE $<$<COMPILE_LANGUAGE:RC>:--use-temp-file>)
     # fs-gnu-ld-gc-sections-20261116: discard unreferenced Release sections after
     # each function/data item is emitted separately.
