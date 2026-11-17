@@ -50,6 +50,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 LZMANumBlockThreads=1
 LZMABlockSize=262144
+LZMANumFastBytes=273
 LZMAUseSeparateProcess=yes
 ; UI 设置
 SetupIconFile={#MyIconFile}
