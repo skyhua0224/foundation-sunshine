@@ -3,6 +3,38 @@
 # Fetch driver dependencies (downloads at configure time)
 include(${CMAKE_MODULE_PATH}/packaging/FetchDriverDeps.cmake)
 
+# Every driver the fetcher can download must have a reviewed license text. The
+# manifest pins the version variables selected above, so a pin bump without a
+# matching license review stops the configure step before packaging.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(NOT Python3_Interpreter_FOUND)
+  message(FATAL_ERROR
+    "Python 3 is required to verify third-party license texts before packaging")
+endif()
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/ci/check-third-party-licenses.py"
+          --root "${CMAKE_SOURCE_DIR}"
+  RESULT_VARIABLE _third_party_license_status
+  OUTPUT_VARIABLE _third_party_license_output
+  ERROR_VARIABLE _third_party_license_error)
+if(NOT _third_party_license_status EQUAL 0)
+  string(STRIP "${_third_party_license_output}${_third_party_license_error}"
+         _third_party_license_message)
+  message(FATAL_ERROR
+    "Third-party license verification failed:\n${_third_party_license_message}")
+endif()
+
+# License texts for the third-party binaries in this package. The Inno installer
+# copies the staging tree and the CPack ZIP is built from it, so both packages
+# carry the same files.
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/third_party/licenses/"
+        DESTINATION "licenses"
+        COMPONENT application)
+install(FILES "${CMAKE_SOURCE_DIR}/NOTICE"
+              "${CMAKE_SOURCE_DIR}/LICENSE"
+        DESTINATION "."
+        COMPONENT application)
+
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
 set(SUNSHINE_MAT_CAPTURE_AVAILABLE 0)
 if (TARGET sunshine_mat_capture)

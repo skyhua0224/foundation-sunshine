@@ -133,6 +133,22 @@ jobs:
       - name: Check relative links and images
         run: python3 scripts/ci/check-doc-links.py --root .
 
+  third-party-licenses:
+    name: Third-party licenses
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # A driver download without a reviewed license text, a version pin that
+      # moved away from the reviewed tag, or a package path that stops copying
+      # licenses/ fails here and at Windows configure time.
+      - name: Every fetched driver has a reviewed license
+        run: python3 scripts/ci/check-third-party-licenses.py --root .
+
   workflow-lint:
     name: Workflow lint
     needs: changes
@@ -1487,7 +1503,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [changes, docs-check, workflow-lint, webui, webui-docs, setup_release, vdd_smoke, mat_smoke, cold_plan, shard, adapter_config, setup_ui, build_win, publish]
+    needs: [changes, docs-check, third-party-licenses, workflow-lint, webui, webui-docs, setup_release, vdd_smoke, mat_smoke, cold_plan, shard, adapter_config, setup_ui, build_win, publish]
     runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: {}
