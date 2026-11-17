@@ -19,6 +19,10 @@ if(MINGW)
     # release executable keeps the same 2 MiB reserve as the GCC baseline.
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_link_options(sunshine_project_options INTERFACE -Wl,--stack,2097152)
+        # fs-size-icf-20261118: fold identical functions at link time. "safe" folds only functions whose address is never
+        # taken or compared (lld reads the address-significance table the compiler emits), so pointer identity, vtables and
+        # std::function comparisons keep their meaning. See "ld.lld --help": --icf=[all,safe,none].
+        target_link_options(sunshine_project_options INTERFACE $<$<CONFIG:Release>:LINKER:--icf=safe>)
     endif()
 endif()
 
