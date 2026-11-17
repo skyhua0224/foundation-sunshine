@@ -18,3 +18,7 @@ tests/sparxie/fixtures/sample-zzz-general-data-20261112.json -text whitespace=cr
 
 # git archive writes the commit and its refs into this file (cmake/prep/build_info.cmake reads it when there is no .git)
 cmake/prep/build_identity_archive.txt export-subst
+
+# These hashes are shared with the component compatibility manifest.
+scripts/packaging/usbip-payload.json text eol=lf
+third_party/licenses/usbip-win2/LICENSE text eol=lf
