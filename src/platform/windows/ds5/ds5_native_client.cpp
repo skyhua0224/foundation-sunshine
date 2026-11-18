@@ -490,7 +490,14 @@ namespace platf::ds5 {
       std::uint64_t sequence { 1 };
       std::atomic<std::int64_t> probe_last_reply_ns { 0 };
       paced_reply_queue replies { [this](std::vector<std::uint8_t> wire) { return bridge.send_reply(std::move(wire)); },
-        paced_reply_queue::interrupt_config {},
+        [] {
+          /* measurement branch only: tuning knobs read from the environment so one build serves a whole sweep */
+          paced_reply_queue::interrupt_config config;
+          if (const auto *v = std::getenv("ALK_PROBE_BUDGET")) config.budget_per_second = static_cast<unsigned>(std::atoi(v));
+          if (const auto *v = std::getenv("ALK_PROBE_PROTECT_MS")) config.protect_window = std::chrono::milliseconds(std::atoi(v));
+          if (const auto *v = std::getenv("ALK_PROBE_PROTECT_US")) config.protect_interval = std::chrono::microseconds(std::atoi(v));
+          return config;
+        }(),
         [] { return static_cast<unsigned>(::ds5::tuning::runtime::state().active_controllers.load(std::memory_order_acquire)); },
         [] { return ::ds5::tuning::runtime::state().input_report_rate_hz.load(std::memory_order_acquire); } };
       struct pcm_counters_t {
