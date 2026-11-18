@@ -64,6 +64,20 @@ namespace {
     return to_ms(kernel) + to_ms(user);
   }
 
+  struct system_times_t {
+    double idle {}, kernel {}, user {};
+  };
+
+  system_times_t
+  system_times() {
+    FILETIME idle, kernel, user;
+    GetSystemTimes(&idle, &kernel, &user);
+    const auto to_ms = [](FILETIME value) {
+      return static_cast<double>((static_cast<std::uint64_t>(value.dwHighDateTime) << 32) | value.dwLowDateTime) / 10000.0;
+    };
+    return { to_ms(idle), to_ms(kernel), to_ms(user) };
+  }
+
   double
   process_cpu_ms() {
     FILETIME creation, exit, kernel, user;
@@ -205,6 +219,7 @@ namespace {
     }
 
     const double cpu_before = process_cpu_ms();
+    const auto system_before = system_times();
     double reader_before = 0;
     for (auto &pad : pads) reader_before += thread_cpu_ms(pad->reader_handle.load());
     const auto begin = clock_type::now();
@@ -292,6 +307,7 @@ namespace {
       pad->reads_mutex.unlock();
     }
     const double cpu_after = process_cpu_ms();
+    const auto system_after = system_times();
     double reader_after = 0;
     for (auto &pad : pads) reader_after += thread_cpu_ms(pad->reader_handle.load());
 
@@ -304,6 +320,15 @@ namespace {
       cpu_after - cpu_before, wall_ms, 100.0 * (cpu_after - cpu_before) / wall_ms, reader_after - reader_before, g_injector_cpu_ms,
       100.0 * (cpu_after - cpu_before - (reader_after - reader_before) - g_injector_cpu_ms) / wall_ms,
       100.0 * (cpu_after - cpu_before - (reader_after - reader_before) - g_injector_cpu_ms) / wall_ms / static_cast<double>(pads.size()));
+    {
+      // kernel time includes the idle time, DPCs and interrupts (usbip-win2 and the HID stack run there)
+      const double idle = system_after.idle - system_before.idle;
+      const double kernel = system_after.kernel - system_before.kernel;
+      const double user = system_after.user - system_before.user;
+      const double total = kernel + user;
+      std::printf("  system_cpu: busy=%.2f%% of all CPUs (%.2f cores of %u), kernel-mode work=%.2f%%, user-mode work=%.2f%% of all CPUs\n", 100.0 * (total - idle) / total,
+        (total - idle) / total * static_cast<double>(std::thread::hardware_concurrency()), std::thread::hardware_concurrency(), 100.0 * (kernel - idle) / total, 100.0 * user / total);
+    }
     std::printf("  reports: device replies=%llu, urb requests=%llu, reads completed by readers=%zu, lost (replies-reads)=%lld (%.2f%%)\n",
       static_cast<unsigned long long>(replies), static_cast<unsigned long long>(urbs), total_reads, static_cast<long long>(replies) - static_cast<long long>(total_reads),
       replies ? 100.0 * (static_cast<double>(replies) - static_cast<double>(total_reads)) / static_cast<double>(replies) : 0.0);
