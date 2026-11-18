@@ -7,7 +7,7 @@
  * read intervals (all reads and reads that carried a changed value), submit-to-read latency, motion continuity,
  * lost reports (replies sent by the device minus reads completed), host CPU and the USB/IP client's re-submit delay.
  *
- * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall40,stall80,stall160]
+ * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle]
  */
 #ifdef _WIN32
 
@@ -182,6 +182,7 @@ namespace {
     unsigned button_hz;
     unsigned gyro_hz;
     unsigned stall_ms;
+    unsigned inject_ms;  // 0: inject for the whole phase; otherwise only for the first inject_ms, then the pad is left idle
   };
 
   double g_injector_cpu_ms = 0;
@@ -232,8 +233,13 @@ namespace {
       unsigned stick_n = 0, button_n = 0, gyro_n = 0;
       std::vector<platf::gamepad_state_t> state(pads.size());
       const auto end = begin + std::chrono::milliseconds(phase_ms);
+      const auto inject_end = options.inject_ms ? begin + std::chrono::milliseconds(options.inject_ms) : end;
       while (clock_type::now() < end) {
         const auto now = clock_type::now();
+        if (now >= inject_end) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          continue;
+        }
         bool did = false;
         if (options.stick_hz && now >= stick_next) {
           stick_next += period(options.stick_hz);
@@ -417,6 +423,25 @@ namespace {
       // typical per-sample step of a 90 deg/s, 20 s period sine at gyro_hz samples/s, in counts
       std::printf("  pad %d: %zu reads, %.1f reads/s\n", pad->index, reads.size(), static_cast<double>(reads.size()) * 1000.0 / wall_ms);
       print_summary("interval, all reads", summarize(all), "us");
+      if (options.inject_ms != 0 || (!options.stick_hz && !options.button_hz && !options.gyro_hz)) {
+        // reads after the last injection (plus 20 ms): does the 4 ms heartbeat keep running while nothing changes?
+        const double idle_from = begin_us + static_cast<double>(options.inject_ms) * 1000.0 + 20000.0;
+        std::vector<double> idle_intervals;
+        std::size_t idle_reads = 0;
+        double previous_at = -1, first_after = -1, last_at = 0;
+        for (const auto &r : reads) {
+          if (r.at_us < idle_from) continue;
+          if (first_after < 0) first_after = r.at_us;
+          ++idle_reads;
+          if (previous_at >= 0) idle_intervals.push_back(r.at_us - previous_at);
+          previous_at = r.at_us;
+          last_at = r.at_us;
+        }
+        const double idle_span_ms = (begin_us + static_cast<double>(phase_ms) * 1000.0 - idle_from) / 1000.0;
+        std::printf("    idle part (after injection stopped): %zu reads in %.0f ms = %.1f reads/s; first read %.1f ms after the idle part began, last %.1f ms before the end\n", idle_reads, idle_span_ms,
+          idle_span_ms > 0 ? static_cast<double>(idle_reads) * 1000.0 / idle_span_ms : 0.0, first_after >= 0 ? (first_after - idle_from) / 1000.0 : -1.0, last_at > 0 ? (begin_us + static_cast<double>(phase_ms) * 1000.0 - last_at) / 1000.0 : -1.0);
+        print_summary("idle part: interval between reads", summarize(idle_intervals), "us");
+      }
       if (options.stick_hz) {
         print_summary("interval, reads with new stick", summarize(fresh_stick), "us");
         print_summary("latency, stick submit->read", summarize(latency_stick), "us");
@@ -444,7 +469,7 @@ int
 main(int argc, char **argv) {
   const unsigned pad_count = argc > 1 ? std::max(1u, std::min(4u, static_cast<unsigned>(std::strtoul(argv[1], nullptr, 10)))) : 1u;
   const unsigned phase_ms = argc > 2 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 6000u;
-  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,");
+  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,");
   timeBeginPeriod(1);
   auto mail = std::make_shared<safe::mail_raw_t>();
   platf::ds5::native_client_t client;
@@ -507,13 +532,16 @@ main(int argc, char **argv) {
   while (std::any_of(pads.begin(), pads.end(), [](auto &p) { return p->reader_handle.load() == nullptr; })) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   std::this_thread::sleep_for(std::chrono::seconds(2));
   const std::vector<phase_options_t> all_phases = {
-    { "sticks", 500, 0, 0, 0 },
-    { "buttons", 0, 125, 0, 0 },
-    { "gyro", 0, 0, 250, 0 },
-    { "mixed", 500, 125, 250, 0 },
-    { "stall40", 500, 0, 0, 40 },
-    { "stall80", 500, 0, 0, 80 },
-    { "stall160", 500, 0, 0, 160 },
+    { "sticks", 500, 0, 0, 0, 0 },
+    { "buttons", 0, 125, 0, 0, 0 },
+    { "gyro", 0, 0, 250, 0, 0 },
+    { "mixed", 500, 125, 250, 0, 0 },
+    { "stall40", 500, 0, 0, 40, 0 },
+    { "stall80", 500, 0, 0, 80, 0 },
+    { "stall160", 500, 0, 0, 160, 0 },
+    { "idle", 0, 0, 0, 0, 0 },
+    { "burstidle", 500, 0, 0, 0, 1000 },
+    { "sparseidle", 0, 125, 0, 0, 1000 },
   };
   for (const auto &phase : all_phases) {
     if (wanted.find(std::string(",") + phase.name + ",") == std::string::npos) continue;
