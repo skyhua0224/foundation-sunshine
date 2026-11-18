@@ -7,7 +7,7 @@
  * read intervals (all reads and reads that carried a changed value), submit-to-read latency, motion continuity,
  * lost reports (replies sent by the device minus reads completed), host CPU and the USB/IP client's re-submit delay.
  *
- * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall]
+ * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall40,stall80,stall160]
  */
 #ifdef _WIN32
 
@@ -182,14 +182,6 @@ namespace {
       pad->reads.reserve(static_cast<std::size_t>(phase_ms) * 3);
       pad->stall_ms.store(options.stall_ms);
     }
-    {
-      auto &stats = probe::stats();
-      std::lock_guard lock(stats.mutex);
-      stats.resubmit_us.clear();
-      stats.held_at_arrival.clear();
-      stats.urbs = 0;
-      stats.replies = 0;
-    }
     std::vector<injection_t> injections;
     injections.reserve(static_cast<std::size_t>(phase_ms) * (options.stick_hz + options.button_hz + options.gyro_hz) * pads.size() / 1000 + 100);
     for (auto &pad : pads) {
@@ -202,6 +194,15 @@ namespace {
       pad->reads.clear();
       pad->recording = true;
     }
+    {
+      // counted over the same window as the reads
+      auto &stats = probe::stats();
+      std::lock_guard lock(stats.mutex);
+      stats.resubmit_us.clear();
+      stats.held_at_arrival.clear();
+      stats.urbs = 0;
+      stats.replies = 0;
+    }
 
     const double cpu_before = process_cpu_ms();
     double reader_before = 0;
@@ -211,7 +212,8 @@ namespace {
     std::thread injector([&] {
       SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
       const auto period = [](unsigned hz) { return hz == 0 ? clock_type::duration::max() : std::chrono::duration_cast<clock_type::duration>(std::chrono::microseconds(1000000 / hz)); };
-      auto stick_next = begin, button_next = begin, gyro_next = begin;
+      auto stick_next = begin, button_next = begin + std::chrono::microseconds(1300), gyro_next = begin + std::chrono::microseconds(700);
+      HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
       unsigned stick_n = 0, button_n = 0, gyro_n = 0;
       std::vector<platf::gamepad_state_t> state(pads.size());
       const auto end = begin + std::chrono::milliseconds(phase_ms);
@@ -253,24 +255,30 @@ namespace {
           }
           did = true;
         }
-        if (!did) std::this_thread::yield();
+        if (!did) {
+          // sleep until the earliest next event instead of spinning, so the process CPU is the real cost of the work
+          auto wake = std::min({ options.stick_hz ? stick_next : clock_type::time_point::max(), options.button_hz ? button_next : clock_type::time_point::max(),
+            options.gyro_hz ? gyro_next : clock_type::time_point::max() });
+          const auto wait = std::chrono::duration_cast<std::chrono::microseconds>(wake - clock_type::now()).count();
+          if (wait > 200 && timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(wait - 150) * 10;  // 100 ns units, relative; wake slightly early, then yield
+            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(timer, 50);
+          }
+          else std::this_thread::yield();
+        }
       }
+      if (timer) CloseHandle(timer);
       g_injector_cpu_ms = thread_cpu_ms(GetCurrentThread());
     });
     injector.join();
     const double wall_ms = (qpc_us() - begin_us) / 1000.0;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    for (auto &pad : pads) {
-      std::lock_guard lock(pad->reads_mutex);
-      pad->recording = false;
-    }
-    const double cpu_after = process_cpu_ms();
-    double reader_after = 0;
-    for (auto &pad : pads) reader_after += thread_cpu_ms(pad->reader_handle.load());
-
     std::uint64_t urbs = 0, replies = 0;
     std::vector<double> resubmit;
     std::vector<unsigned> held;
+    for (auto &pad : pads) pad->reads_mutex.lock();
     {
       auto &stats = probe::stats();
       std::lock_guard lock(stats.mutex);
@@ -279,6 +287,14 @@ namespace {
       resubmit = stats.resubmit_us;
       held = stats.held_at_arrival;
     }
+    for (auto &pad : pads) {
+      pad->recording = false;
+      pad->reads_mutex.unlock();
+    }
+    const double cpu_after = process_cpu_ms();
+    double reader_after = 0;
+    for (auto &pad : pads) reader_after += thread_cpu_ms(pad->reader_handle.load());
+
     std::size_t total_reads = 0;
     for (auto &pad : pads) total_reads += pad->reads.size();
 
@@ -332,7 +348,7 @@ namespace {
           ++gyro_changes;
           if (prev_gyro_change_at >= 0) fresh_gyro.push_back(r.at_us - prev_gyro_change_at);
           prev_gyro_change_at = r.at_us;
-          steps.push_back(std::abs(static_cast<double>(gyro) - static_cast<double>(prev_g)));
+          if (!have_ts || static_cast<std::int32_t>(le32(r.report, 28) - previous_ts) < 3 * 20000) steps.push_back(std::abs(static_cast<double>(gyro) - static_cast<double>(prev_g)));
         }
         prev_stick = stick;
         prev_button = button;
@@ -403,7 +419,7 @@ int
 main(int argc, char **argv) {
   const unsigned pad_count = argc > 1 ? std::max(1u, std::min(4u, static_cast<unsigned>(std::strtoul(argv[1], nullptr, 10)))) : 1u;
   const unsigned phase_ms = argc > 2 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 6000u;
-  const std::string wanted = argc > 3 ? argv[3] : "sticks,buttons,gyro,mixed,stall";
+  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,");
   timeBeginPeriod(1);
   auto mail = std::make_shared<safe::mail_raw_t>();
   platf::ds5::native_client_t client;
@@ -470,10 +486,12 @@ main(int argc, char **argv) {
     { "buttons", 0, 125, 0, 0 },
     { "gyro", 0, 0, 250, 0 },
     { "mixed", 500, 125, 250, 0 },
-    { "stall", 500, 0, 0, 40 },
+    { "stall40", 500, 0, 0, 40 },
+    { "stall80", 500, 0, 0, 80 },
+    { "stall160", 500, 0, 0, 160 },
   };
   for (const auto &phase : all_phases) {
-    if (wanted.find(phase.name) == std::string::npos) continue;
+    if (wanted.find(std::string(",") + phase.name + ",") == std::string::npos) continue;
     run_phase(client, pads, phase, phase_ms);
   }
   for (auto &pad : pads) pad->stop.store(true);
