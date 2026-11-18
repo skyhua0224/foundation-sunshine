@@ -25,6 +25,7 @@
   #include <cstdint>
   #include <cstdio>
   #include <cstdlib>
+  #include <filesystem>
   #include <map>
   #include <memory>
   #include <mutex>
@@ -34,6 +35,7 @@
 
   #include <boost/log/sources/severity_logger.hpp>
 
+  #include "src/ds5/tuning_profile.h"
   #include "src/platform/windows/ds5/ds5_native_client.h"
   #include "src/platform/windows/ds5/ds5_probe_stats.h"
   #include "src/thread_safe.h"
@@ -43,6 +45,27 @@ boost::log::sources::severity_logger<int> debug;
 
 namespace {
   using clock_type = std::chrono::steady_clock;
+
+  /** Save key 101 (the motion report rate the host asks clients for) through the real tuning store; the saved value is published to the runtime and pushed to the live pads. */
+  bool
+  save_motion_cap(ds5::tuning::store_t &store, unsigned hz) {
+    const auto result = store.apply_json({ { "schema", "ALK-DS5T/1" }, { "values", { { "ds5.compat.reportRateCapHz", hz } } } });
+    if (!result.ok) std::printf("save of key 101 = %u failed: %s\n", hz, result.error.c_str());
+    return result.ok;
+  }
+
+  /** What the clients are asked for: every set_motion_event_state waiting in the feedback queues of the pads. */
+  void
+  print_motion_requests(const char *when, const std::vector<platf::feedback_queue_t> &queues) {
+    for (std::size_t index = 0; index != queues.size(); ++index) {
+      while (auto message = queues[index]->pop(std::chrono::milliseconds(50))) {
+        if (message->type != platf::gamepad_feedback_e::set_motion_event_state) continue;
+        std::printf("MOTION_REQUEST %s pad=%zu type=%s rate=%u Hz\n", when, index,
+          message->data.motion_event_state.motion_type == LI_MOTION_TYPE_GYRO ? "gyro" : "accel",
+          static_cast<unsigned>(message->data.motion_event_state.report_rate));
+      }
+    }
+  }
 
   double
   qpc_us() {
@@ -587,9 +610,17 @@ int
 main(int argc, char **argv) {
   const unsigned pad_count = argc > 1 ? std::max(1u, std::min(4u, static_cast<unsigned>(std::strtoul(argv[1], nullptr, 10)))) : 1u;
   const unsigned phase_ms = argc > 2 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 6000u;
-  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,tap0,tap80,tap120,tap160,");
+  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,tap0,tap80,tap120,tap160,gyro500,gyro1000,");
   timeBeginPeriod(1);
   auto mail = std::make_shared<safe::mail_raw_t>();
+  /* ALK_PROBE_MOTION_CAP=<Hz>: key 101 as saved before the pads are allocated (default 250). ALK_PROBE_MOTION_LIVE=1: after the pads
+   * are up, save 500, 1000, 100 and 250 in turn and print what the clients are asked for each time. */
+  const auto temp = std::filesystem::temp_directory_path() / "ds5-probe-tuning.json";
+  std::error_code ignored;
+  std::filesystem::remove(temp, ignored);
+  ds5::tuning::store_t tuning_store(temp);
+  tuning_store.load();
+  if (const auto *cap = std::getenv("ALK_PROBE_MOTION_CAP")) save_motion_cap(tuning_store, static_cast<unsigned>(std::strtoul(cap, nullptr, 10)));
   platf::ds5::native_client_t client;
   std::vector<platf::feedback_queue_t> queues;
   for (unsigned index = 0; index != pad_count; ++index) {
@@ -598,6 +629,15 @@ main(int argc, char **argv) {
     if (client.alloc({ static_cast<int>(index), static_cast<std::uint8_t>(index) }, std::move(queue), true) != 0) {
       std::printf("FAIL alloc pad %u\n", index);
       return 1;
+    }
+  }
+  print_motion_requests("at-allocation", queues);
+  if (std::getenv("ALK_PROBE_MOTION_LIVE") != nullptr) {
+    for (const unsigned hz : { 500u, 1000u, 100u, 250u }) {
+      save_motion_cap(tuning_store, hz);
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::printf("LIVE saved key 101 = %u Hz\n", hz);
+      print_motion_requests("after-save", queues);
     }
   }
   std::vector<HANDLE> handles;
@@ -654,6 +694,8 @@ main(int argc, char **argv) {
     { "sticks", 500, 0, 0, 0, 0 },
     { "buttons", 0, 125, 0, 0, 0 },
     { "gyro", 0, 0, 250, 0, 0 },
+    { "gyro500", 0, 0, 500, 0, 0 },
+    { "gyro1000", 0, 0, 1000, 0, 0 },
     { "mixed", 500, 125, 250, 0, 0 },
     { "stall40", 500, 0, 0, 40, 0 },
     { "stall80", 500, 0, 0, 80, 0 },
