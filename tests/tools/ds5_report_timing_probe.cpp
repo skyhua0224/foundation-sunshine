@@ -372,7 +372,9 @@ namespace {
           ++gyro_n;
           // slow sine, 20 s period, +-90 deg/s: consecutive samples differ by a few counts only
           const double t = static_cast<double>(gyro_n) / static_cast<double>(options.gyro_hz);
-          const float x = static_cast<float>(90.0 * std::sin(2.0 * 3.14159265358979 * t / 20.0));
+          /* ALK_PROBE_GYRO_ALT: every sample differs from the one before (a 3 deg/s step each time), so the reads that carry a new gyro value count the samples, not the quantisation of a slow sine */
+          static const bool alternate = std::getenv("ALK_PROBE_GYRO_ALT") != nullptr;
+          const float x = static_cast<float>(90.0 * std::sin(2.0 * 3.14159265358979 * t / 20.0)) + (alternate && (gyro_n & 1u) != 0u ? 3.0f : 0.0f);
           for (std::size_t p = 0; p != pads.size(); ++p) {
             platf::gamepad_motion_t gyro { { pads[p]->index, static_cast<std::uint8_t>(pads[p]->index) }, LI_MOTION_TYPE_GYRO, x, 0.0f, 0.0f };
             injections.push_back({ qpc_us(), static_cast<int>(p), 2, static_cast<int>(std::lround(x * 100.0f)) });
