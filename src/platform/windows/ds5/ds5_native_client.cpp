@@ -64,6 +64,7 @@
 #include "src/platform/windows/audio_default_guard.h"
 #include "src/platform/windows/ds5/ds5_native_client.h"
 #include "src/platform/windows/ds5/ds5_paced_reply.h"
+#include "src/platform/windows/ds5/ds5_probe_stats.h"
 #include "src/platform/windows/ds5/ds5_pad_audio.h"
 #include "src/remote_usb/loopback_usbip_bridge.h"
 #include "src/remote_usb/remote_usb_host_controller.h"
@@ -453,6 +454,7 @@ namespace platf::ds5 {
       ::ds5::control_extension::output_t game_extension {};
       std::uint64_t session_id { 0 };
       std::uint64_t sequence { 1 };
+      std::atomic<std::int64_t> probe_last_reply_ns { 0 };
       paced_reply_queue replies { [this](std::vector<std::uint8_t> wire) { return bridge.send_reply(std::move(wire)); } };
       struct pcm_counters_t {
         std::uint64_t packets {};
@@ -1209,8 +1211,24 @@ namespace platf::ds5 {
         if (endpoint == 4 && direction == 1 && packet_count == 0xffffffffu) {
           std::array<std::uint8_t, 8> setup {};
           std::copy_n(wire.data() + 40, setup.size(), setup.begin());
+          {
+            const auto arrived_ns = probe::now_ns();
+            const auto previous_ns = probe_last_reply_ns.load(std::memory_order_acquire);
+            const auto waiting = static_cast<unsigned>(replies.held());
+            auto &probe_stats = probe::stats();
+            std::lock_guard probe_lock(probe_stats.mutex);
+            ++probe_stats.urbs;
+            probe_stats.resubmit_us.push_back(previous_ns == 0 ? -1.0 : static_cast<double>(arrived_ns - previous_ns) / 1000.0);
+            probe_stats.held_at_arrival.push_back(waiting);
+          }
           replies.schedule_interrupt(paced_reply_queue::lane::interrupt_in, sequence_number,
             [this, sequence_number, endpoint, direction, length, setup] {
+              probe_last_reply_ns.store(probe::now_ns(), std::memory_order_release);
+              {
+                auto &probe_stats = probe::stats();
+                std::lock_guard probe_lock(probe_stats.mutex);
+                ++probe_stats.replies;
+              }
               std::vector<std::uint8_t> current_report;
               {
                 std::lock_guard lock(mutex);
