@@ -75,6 +75,7 @@ namespace {
 
   struct thread_cpu_t {
     double cpu_ms {};
+    double kernel_ms {};
     std::string name;
   };
 
@@ -93,6 +94,11 @@ namespace {
       if (!thread) continue;
       thread_cpu_t value;
       value.cpu_ms = thread_cpu_ms(thread);
+      {
+        FILETIME creation, exit, kernel, user;
+        if (GetThreadTimes(thread, &creation, &exit, &kernel, &user))
+          value.kernel_ms = static_cast<double>((static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) / 10000.0;
+      }
       value.name = "?";
       PWSTR description = nullptr;
       if (get_description && SUCCEEDED(get_description(thread, &description)) && description) {
@@ -405,17 +411,24 @@ namespace {
       100.0 * (cpu_after - cpu_before - (reader_after - reader_before) - g_injector_cpu_ms) / wall_ms / static_cast<double>(pads.size()));
     {
       // CPU per thread over the phase: the injector and readers are the probe itself, the rest is the host path
-      std::map<std::string, std::pair<double, int>> by_name;
+      struct slot_t {
+        double cpu_ms {}, kernel_ms {};
+        int count {};
+      };
+      std::map<std::string, slot_t> by_name;
       for (const auto &[tid, after] : threads_after) {
         const auto before = threads_before.find(tid);
         const double delta = after.cpu_ms - (before != threads_before.end() ? before->second.cpu_ms : 0.0);
         if (delta < 0.5) continue;
         auto &slot = by_name[after.name];
-        slot.first += delta;
-        ++slot.second;
+        slot.cpu_ms += delta;
+        slot.kernel_ms += after.kernel_ms - (before != threads_before.end() ? before->second.kernel_ms : 0.0);
+        ++slot.count;
       }
       std::printf("  threads:");
-      for (const auto &[name, slot] : by_name) std::printf(" %s x%d=%.1f ms (%.2f%% of one core);", name.c_str(), slot.second, slot.first, 100.0 * slot.first / wall_ms);
+      for (const auto &[name, slot] : by_name)
+        std::printf(" %s x%d=%.1f ms (%.2f%% of one core, kernel %.0f%%);", name.c_str(), slot.count, slot.cpu_ms, 100.0 * slot.cpu_ms / wall_ms,
+          slot.cpu_ms > 0 ? 100.0 * slot.kernel_ms / slot.cpu_ms : 0.0);
       std::printf("\n");
     }
     {
