@@ -10,9 +10,9 @@
  *    one, so sequence numbers and timestamps keep advancing.
  *  - A stream value changed (stick, analog trigger, motion, touch position):
  *    the next reply follows after the stream floor, at least 1 ms, longer when
- *    many pads are active so the replies of all of them together stay within a
- *    budget (every reply costs the same, so CPU would otherwise grow with the
- *    pad count).
+ *    more than two pads are active so the replies of all of them together stay
+ *    within a budget (every reply costs the same, so CPU would otherwise grow
+ *    with the pad count).
  *  - A button changed: that state is answered by a reply of its own after the
  *    hard 1 ms floor, whatever the stream floor is; two changes are never
  *    merged into one reply.
@@ -24,11 +24,15 @@
  *    is held every report shows it, so only the release puts a press at risk.
  *    The last report before the release is the one to keep.  After the reply
  *    to a release the lane therefore answers at most once per protect_interval
- *    for protect_window, on the same 4 ms grid as the heartbeat: the release
- *    and 30 more replies fill 31 of the 32 slots, the last report that showed
- *    the button down stays in the queue for at least 120 ms, and one slot is
- *    left for a button pressed in the meantime.  A press needs no protection of
- *    its own, and stream data keeps its fast path the rest of the time.
+ *    for protect_window on a 4.3 ms grid (the heartbeat keeps that grid too):
+ *    the release and 30 more replies fill 31 of the 32 slots, so the last
+ *    report that showed the button down stays in the queue for 133 ms, longer
+ *    than the 124 ms of the fixed pacing, and one slot is left for a button
+ *    pressed in the meantime.  Releases less than 32 ms apart (a burst of
+ *    presses) keep the fixed pacing's 4 ms and 124 ms: the earlier presses of
+ *    such a burst are out of the queue after a stall whatever the pacing is.
+ *    A press needs no protection of its own, and stream data keeps its fast
+ *    path the rest of the time.
  *
  * The host may keep several URBs outstanding.  The time a held URB becomes due
  * is derived from the moment the last reply left; no per-URB schedule is
@@ -69,11 +73,19 @@ namespace platf {
       /** Period of the reply when nothing changed. */
       duration heartbeat { std::chrono::milliseconds(4) };
       /** Replies per second all active pads may use together for stream changes. */
-      unsigned budget_per_second { 2000 };
+      unsigned budget_per_second { 1500 };
+      /** Up to this many active pads each keep the hard floor; the budget only divides among more pads. */
+      unsigned full_rate_pads { 2 };
       /** After the reply to a button release, for this long ... (the release and 30 more replies of the 32 the HID queue holds) */
-      duration protect_window { std::chrono::milliseconds(120) };
-      /** ... at most one reply per this interval (the old fixed pacing). */
-      duration protect_interval { std::chrono::milliseconds(4) };
+      duration protect_window { std::chrono::milliseconds(132) };
+      /** ... at most one reply per this interval: the last report that showed the button down then stays in the queue for 133 ms. */
+      duration protect_interval { std::chrono::microseconds(4300) };
+      /** A release this soon after the previous one belongs to a burst of presses (faster than 30 per second). The
+       *  earlier presses of such a burst are gone from the queue after a stall anyway, so the protection falls back
+       *  to what the fixed 4 ms pacing gave (124 ms). */
+      duration burst_gap { std::chrono::milliseconds(32) };
+      duration burst_window { std::chrono::milliseconds(120) };
+      duration burst_interval { std::chrono::milliseconds(4) };
     };
 
     struct taken_t {
@@ -133,7 +145,7 @@ namespace platf {
       /* While the protection lasts the replies follow the grid at the protect interval; it ends at
        * protect_until_ whatever the clock does in between, so the due time never waits for a
        * protection that is over. */
-      const auto protected_due = std::max(grid_ + std::max(interval, settings_.protect_interval), earliest);
+      const auto protected_due = std::max(grid_ + std::max(interval, guard_interval_), earliest);
       return std::max(normal, std::min(protected_due, protect_until_));
     }
 
@@ -162,14 +174,14 @@ namespace platf {
       last_sent_ = now;
       if (edge) {
         /* The reply to a release starts the protection of the last report that showed the button down. */
-        if (edges_.front()) protect_until_ = now + settings_.protect_window;
+        if (edges_.front()) start_guard(now);
         edges_.pop_front();
       }
       else {
         dirty_ = false;
         if (guard_owed_) {
           guard_owed_ = false;
-          protect_until_ = now + settings_.protect_window;
+          start_guard(now);
         }
       }
       return taken;
@@ -191,6 +203,8 @@ namespace platf {
       last_sent_ = time_point {};
       grid_ = time_point {};
       protect_until_ = time_point {};
+      last_release_ = time_point {};
+      guard_interval_ = settings_.protect_interval;
       edges_.clear();
       guard_owed_ = false;
       dirty_ = false;
@@ -199,11 +213,21 @@ namespace platf {
     /** The stream floor for @p pads active pads. */
     duration
     stream_floor(unsigned pads) const {
+      if (pads <= settings_.full_rate_pads) return settings_.min_interval;
       const auto shared = std::chrono::duration_cast<duration>(std::chrono::duration<double>(static_cast<double>(std::max(pads, 1u)) / std::max(settings_.budget_per_second, 1u)));
-      return std::max(settings_.min_interval, shared);
+      /* never slower than the heartbeat: a changed report must not wait longer than an unchanged one */
+      return std::min(std::max(settings_.min_interval, shared), std::max(settings_.heartbeat, settings_.min_interval));
     }
 
   private:
+    void
+    start_guard(time_point now) {
+      const bool burst = last_release_ != time_point {} && now - last_release_ < settings_.burst_gap;
+      last_release_ = now;
+      guard_interval_ = burst ? settings_.burst_interval : settings_.protect_interval;
+      protect_until_ = now + (burst ? settings_.burst_window : settings_.protect_window);
+    }
+
     struct entry_t {
       std::uint32_t sequence;
       Item item;
@@ -214,6 +238,8 @@ namespace platf {
     time_point last_sent_ {};  ///< when the last reply really left
     time_point grid_ {};  ///< where the heartbeat grid stands: last_sent_, or a little before it after a late timer
     time_point protect_until_ {};
+    time_point last_release_ {};  ///< when the previous release was answered
+    duration guard_interval_ { std::chrono::microseconds(4300) };  ///< the protect interval of the protection that runs
     std::deque<bool> edges_;  ///< one entry per button change waiting for its own reply: true for a release
     bool guard_owed_ { false };  ///< a release found no room of its own; its protection starts with the next reply
     bool dirty_ { false };

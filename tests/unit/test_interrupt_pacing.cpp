@@ -241,15 +241,20 @@ TEST(InterruptLane, IdleReplyRateIsTheHeartbeat) {
   EXPECT_NEAR(static_cast<double>(host.count(t0 + 1s, t0 + 2s)), 250.0, 2.0);
 }
 
-/* The reply budget: every pad answers at 2000 / pads at most while a stream moves. */
+/* The reply budget: one or two pads keep the hard floor; with more, every pad answers at 1500 / pads at most while a stream moves. */
 TEST(InterruptLane, TheStreamFloorGrowsWithTheNumberOfActivePads) {
   lane_t lane;
   EXPECT_EQ(lane.stream_floor(1), 1ms);
   EXPECT_EQ(lane.stream_floor(0), 1ms);
   EXPECT_EQ(lane.stream_floor(2), 1ms);
-  EXPECT_EQ(lane.stream_floor(4), 2ms);
+  EXPECT_EQ(lane.stream_floor(3), 2ms);
+  EXPECT_EQ(std::chrono::duration_cast<std::chrono::microseconds>(lane.stream_floor(4)), 2666us);
+}
+
+TEST(InterruptLane, TheStreamFloorNeverExceedsTheHeartbeat) {
+  lane_t lane;
   EXPECT_EQ(lane.stream_floor(8), 4ms);
-  EXPECT_EQ(lane.stream_floor(16), 8ms);
+  EXPECT_EQ(lane.stream_floor(16), 4ms);
 }
 
 TEST(InterruptLane, FourPadsTogetherStayWithinTheBudget) {
@@ -260,8 +265,8 @@ TEST(InterruptLane, FourPadsTogetherStayWithinTheBudget) {
   const auto one_rate = static_cast<double>(one.count(t0 + 1s, t0 + 2s));
   const auto four_rate = static_cast<double>(four.count(t0 + 1s, t0 + 2s)) * 4.0;
   EXPECT_NEAR(one_rate, 1000.0, 10.0);
-  EXPECT_LE(four_rate, 2000.0 * 1.02);
-  EXPECT_GE(four_rate, 2000.0 * 0.95);
+  EXPECT_LE(four_rate, 1500.0 * 1.02);
+  EXPECT_GE(four_rate, 1500.0 * 0.95);
 }
 
 TEST(InterruptLane, TheBudgetNeverSlowsTheHeartbeat) {
@@ -389,21 +394,21 @@ TEST(InterruptLane, APressAloneNeedsNoProtection) {
   EXPECT_LE(host.longest_silence(t0, t0 + 3s), 2100us);
 }
 
-TEST(InterruptLane, TheProtectionAfterAReleaseKeepsTheFourMillisecondGridAndThenEnds) {
+TEST(InterruptLane, TheProtectionAfterAReleaseKeepsItsGridAndThenEnds) {
   host_t host { 2 };
   const auto release = t0 + 1s;
   host.run(t0, t0 + 3s, merged(train(t0, t0 + 3s, 500), { { release, report_change::release } }));
-  /* within the window: one reply per 4 ms on the grid, plus the release reply */
-  EXPECT_LE(host.count(release, release + 120ms), 31u);
-  EXPECT_GE(host.count(release, release + 120ms), 29u);
+  /* within the window: one reply per 4.3 ms on the grid, plus the release reply */
+  EXPECT_LE(host.count(release, release + 132ms), 31u);
+  EXPECT_GE(host.count(release, release + 132ms), 29u);
   /* after the window: back to the stream rate */
   EXPECT_NEAR(static_cast<double>(host.count(release + 300ms, release + 800ms)), 250.0, 5.0);
-  /* the heartbeat never stops, protection or not */
-  EXPECT_LE(host.longest_silence(t0, t0 + 3s), 4100us);
+  /* the heartbeat never stops, protection or not (it follows the protection's grid while that lasts) */
+  EXPECT_LE(host.longest_silence(t0, t0 + 3s), 4400us);
 }
 
 /* Timers are never exact: the protected replies must not drift by the lateness of every timer. */
-TEST(InterruptLane, TheProtectedRepliesStayOnTheFourMillisecondGridWhenTheTimerIsLate) {
+TEST(InterruptLane, TheProtectedRepliesStayOnTheirGridWhenTheTimerIsLate) {
   lane_t lane;
   lane.hold(1, 1);
   lane.new_data(report_change::release);
@@ -417,8 +422,8 @@ TEST(InterruptLane, TheProtectedRepliesStayOnTheFourMillisecondGridWhenTheTimerI
     now = *due + 250us;  // every timer fires 250 us late
     ASSERT_TRUE(lane.take_if_due(now, 1));
   }
-  /* 28 protected replies after the release at t0: the grid has kept 4 ms apart, not 4.25 ms */
-  EXPECT_LE(now, t0 + 28 * 4ms + 250us);
+  /* 28 protected replies after the release at t0: the grid has kept 4.3 ms apart, not 4.55 ms */
+  EXPECT_LE(now, t0 + 28 * 4300us + 250us);
 }
 
 TEST(InterruptLane, AReleaseThatFindsNoRoomOfItsOwnStillStartsTheProtectionWithTheNextReply) {
@@ -436,7 +441,7 @@ TEST(InterruptLane, AReleaseThatFindsNoRoomOfItsOwnStillStartsTheProtectionWithT
   now += 1ms;
   ASSERT_FALSE(lane.take_if_due(now, 1)->edge);  // the stream reply that carries the release
   lane.new_data(report_change::stream);
-  EXPECT_EQ(lane.next_due(1), now + 4ms);  // protected
+  EXPECT_EQ(lane.next_due(1), now + 4300us);  // protected
 }
 
 TEST(InterruptLane, ShortTapsUnderAFastStreamKeepEveryPressVisibleToAStalledReader) {
@@ -474,19 +479,19 @@ TEST(InterruptLane, StreamRepliesWaitTheProtectIntervalWhileTheProtectionLastsAn
   ASSERT_TRUE(lane.take_if_due(t0, 1)->edge);
   lane.hold(2, 2);
   lane.new_data(report_change::stream);
-  EXPECT_EQ(lane.next_due(1), t0 + 4ms);  // not 1 ms
-  ASSERT_TRUE(lane.take_if_due(t0 + 4ms, 1));
-  /* the window ends 120 ms after the release reply; a reply 117 ms in is followed at the window's end */
+  EXPECT_EQ(lane.next_due(1), t0 + 4300us);  // not 1 ms
+  ASSERT_TRUE(lane.take_if_due(t0 + 4300us, 1));
+  /* the window ends 132 ms after the release reply; a reply 129 ms in is followed at the window's end */
   lane.hold(3, 3);
   lane.new_data(report_change::stream);
-  ASSERT_TRUE(lane.take_if_due(t0 + 117ms, 1));
+  ASSERT_TRUE(lane.take_if_due(t0 + 129ms, 1));
   lane.hold(4, 4);
   lane.new_data(report_change::stream);
-  EXPECT_EQ(lane.next_due(1), t0 + 120ms);
-  ASSERT_TRUE(lane.take_if_due(t0 + 120ms, 1));
+  EXPECT_EQ(lane.next_due(1), t0 + 132ms);
+  ASSERT_TRUE(lane.take_if_due(t0 + 132ms, 1));
   lane.hold(5, 5);
   lane.new_data(report_change::stream);
-  EXPECT_EQ(lane.next_due(1), t0 + 121ms);  // the floor again
+  EXPECT_EQ(lane.next_due(1), t0 + 133ms);  // the floor again
 }
 
 /* Timers are never exact: a heartbeat that leaves a little late must not push the next one back. */
@@ -572,4 +577,39 @@ TEST(InterruptLane, TheNextHeartbeatAfterALateOneIsStillOnTheGrid) {
   ASSERT_TRUE(lane.take_if_due(t0 + 4ms + 2500us, 1));
   lane.hold(3, 3);
   EXPECT_EQ(lane.next_due(1), t0 + 8ms);
+}
+
+/* A burst of presses (releases less than 32 ms apart) keeps the 4 ms pacing; a single press gets the longer one. */
+TEST(InterruptLane, AReleaseSoonAfterAnotherOneKeepsTheOldFourMillisecondPacing) {
+  lane_t lane;
+  for (std::uint32_t i = 1; i <= 8; ++i) lane.hold(i, static_cast<int>(i));
+  lane.new_data(report_change::release);
+  ASSERT_TRUE(lane.take_if_due(t0, 1)->edge);
+  lane.new_data(report_change::stream);
+  EXPECT_EQ(lane.next_due(1), t0 + 4300us);
+  ASSERT_TRUE(lane.take_if_due(t0 + 4300us, 1));
+  /* the next release comes 20 ms after the first: a burst */
+  lane.new_data(report_change::release);
+  ASSERT_TRUE(lane.take_if_due(t0 + 20ms, 1)->edge);
+  lane.new_data(report_change::stream);
+  EXPECT_EQ(lane.next_due(1), t0 + 24ms);
+}
+
+TEST(InterruptLane, AReleaseWellAfterAnotherOneGetsTheLongerProtection) {
+  lane_t lane;
+  for (std::uint32_t i = 1; i <= 8; ++i) lane.hold(i, static_cast<int>(i));
+  lane.new_data(report_change::release);
+  ASSERT_TRUE(lane.take_if_due(t0, 1)->edge);
+  lane.new_data(report_change::release);
+  ASSERT_TRUE(lane.take_if_due(t0 + 70ms, 1)->edge);
+  lane.new_data(report_change::stream);
+  EXPECT_EQ(lane.next_due(1), t0 + 70ms + 4300us);
+}
+
+/* A press every 70 ms for 30 ms keeps the whole 133 ms the longer protection promises, even 160 ms stalls lose nothing. */
+TEST(InterruptLane, ShortTapsSurviveAStallOf160MillisecondsThatStartsWithThePress) {
+  for (const auto hold : { 30ms, 50ms, 80ms }) {
+    const auto run = run_tap({}, hold);
+    EXPECT_TRUE(down_report_in_queue(run, run.press + 160ms)) << "hold " << hold.count() << " ms";
+  }
 }
