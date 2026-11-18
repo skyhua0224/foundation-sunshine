@@ -230,6 +230,11 @@ namespace platf {
     void
     run() {
       SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+      {
+        using set_fn_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
+        static const auto set_description = reinterpret_cast<set_fn_t>(reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "SetThreadDescription")));
+        if (set_description) set_description(GetCurrentThread(), L"ds5-queue-worker");
+      }
       const std::array<HANDLE, 2> handles { wake_, timer_ };
       for (;;) {
         {

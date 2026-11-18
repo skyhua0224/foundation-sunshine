@@ -7,7 +7,7 @@
  * read intervals (all reads and reads that carried a changed value), submit-to-read latency, motion continuity,
  * lost reports (replies sent by the device minus reads completed), host CPU and the USB/IP client's re-submit delay.
  *
- * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle]
+ * usage: ds5_report_timing_probe [pads=1] [phase_ms=6000] [phases=sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,tap0,tap80,tap120,tap160]
  */
 #ifdef _WIN32
 
@@ -15,6 +15,7 @@
 
   #include <hidsdi.h>
   #include <setupapi.h>
+  #include <tlhelp32.h>
 
   #include <algorithm>
   #include <array>
@@ -24,6 +25,7 @@
   #include <cstdint>
   #include <cstdio>
   #include <cstdlib>
+  #include <map>
   #include <memory>
   #include <mutex>
   #include <string>
@@ -62,6 +64,48 @@ namespace {
       return static_cast<double>((static_cast<std::uint64_t>(value.dwHighDateTime) << 32) | value.dwLowDateTime) / 10000.0;
     };
     return to_ms(kernel) + to_ms(user);
+  }
+
+  void
+  name_this_thread(const wchar_t *name) {
+    using fn_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
+    static const auto fn = reinterpret_cast<fn_t>(reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "SetThreadDescription")));
+    if (fn) fn(GetCurrentThread(), name);
+  }
+
+  struct thread_cpu_t {
+    double cpu_ms {};
+    std::string name;
+  };
+
+  // CPU time of every thread of this process by thread id, with the name set by name_this_thread() (or "?")
+  std::map<DWORD, thread_cpu_t>
+  snapshot_threads() {
+    using get_fn_t = HRESULT(WINAPI *)(HANDLE, PWSTR *);
+    static const auto get_description = reinterpret_cast<get_fn_t>(reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "GetThreadDescription")));
+    std::map<DWORD, thread_cpu_t> result;
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return result;
+    THREADENTRY32 entry { sizeof(entry) };
+    for (auto more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+      if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
+      const auto thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+      if (!thread) continue;
+      thread_cpu_t value;
+      value.cpu_ms = thread_cpu_ms(thread);
+      value.name = "?";
+      PWSTR description = nullptr;
+      if (get_description && SUCCEEDED(get_description(thread, &description)) && description) {
+        std::string narrow;
+        for (auto *c = description; *c; ++c) narrow.push_back(static_cast<char>(*c));
+        if (!narrow.empty()) value.name = narrow;
+        LocalFree(description);
+      }
+      CloseHandle(thread);
+      result.emplace(entry.th32ThreadID, std::move(value));
+    }
+    CloseHandle(snapshot);
+    return result;
   }
 
   struct system_times_t {
@@ -183,9 +227,12 @@ namespace {
     unsigned gyro_hz;
     unsigned stall_ms;
     unsigned inject_ms;  // 0: inject for the whole phase; otherwise only for the first inject_ms, then the pad is left idle
+    unsigned tap_ms { 0 };  // short presses of A that last this long ...
+    unsigned tap_period_ms { 0 };  // ... one every tap_period_ms (0: none)
   };
 
   double g_injector_cpu_ms = 0;
+  unsigned g_taps_injected = 0;
 
   void
   run_phase(platf::ds5::native_client_t &client, std::vector<std::unique_ptr<pad_t>> &pads, const phase_options_t &options, unsigned phase_ms) {
@@ -219,18 +266,24 @@ namespace {
       stats.replies = 0;
     }
 
+    const auto threads_before = snapshot_threads();
     const double cpu_before = process_cpu_ms();
     const auto system_before = system_times();
     double reader_before = 0;
     for (auto &pad : pads) reader_before += thread_cpu_ms(pad->reader_handle.load());
+    g_taps_injected = 0;
     const auto begin = clock_type::now();
     const double begin_us = qpc_us();
     std::thread injector([&] {
       SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+      name_this_thread(L"probe-injector");
       const auto period = [](unsigned hz) { return hz == 0 ? clock_type::duration::max() : std::chrono::duration_cast<clock_type::duration>(std::chrono::microseconds(1000000 / hz)); };
       auto stick_next = begin, button_next = begin + std::chrono::microseconds(1300), gyro_next = begin + std::chrono::microseconds(700);
       HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
       unsigned stick_n = 0, button_n = 0, gyro_n = 0;
+      auto tap_next = begin + std::chrono::microseconds(2300);
+      auto tap_release = clock_type::time_point::max();
+      bool tap_down = false;
       std::vector<platf::gamepad_state_t> state(pads.size());
       const auto end = begin + std::chrono::milliseconds(phase_ms);
       const auto inject_end = options.inject_ms ? begin + std::chrono::milliseconds(options.inject_ms) : end;
@@ -263,6 +316,28 @@ namespace {
           }
           did = true;
         }
+        if (options.tap_period_ms) {
+          if (!tap_down && now >= tap_next) {
+            tap_down = true;
+            tap_release = now + std::chrono::milliseconds(options.tap_ms);
+            tap_next += std::chrono::milliseconds(options.tap_period_ms);
+            ++g_taps_injected;
+            for (std::size_t p = 0; p != pads.size(); ++p) {
+              state[p].buttonFlags = platf::A;
+              client.submit_input(pads[p]->index, state[p]);
+            }
+            did = true;
+          }
+          else if (tap_down && now >= tap_release) {
+            tap_down = false;
+            tap_release = clock_type::time_point::max();
+            for (std::size_t p = 0; p != pads.size(); ++p) {
+              state[p].buttonFlags = 0;
+              client.submit_input(pads[p]->index, state[p]);
+            }
+            did = true;
+          }
+        }
         if (options.gyro_hz && now >= gyro_next) {
           gyro_next += period(options.gyro_hz);
           ++gyro_n;
@@ -279,7 +354,8 @@ namespace {
         if (!did) {
           // sleep until the earliest next event instead of spinning, so the process CPU is the real cost of the work
           auto wake = std::min({ options.stick_hz ? stick_next : clock_type::time_point::max(), options.button_hz ? button_next : clock_type::time_point::max(),
-            options.gyro_hz ? gyro_next : clock_type::time_point::max() });
+            options.gyro_hz ? gyro_next : clock_type::time_point::max(),
+            options.tap_period_ms ? (tap_down ? tap_release : tap_next) : clock_type::time_point::max() });
           const auto wait = std::chrono::duration_cast<std::chrono::microseconds>(wake - clock_type::now()).count();
           if (wait > 200 && timer) {
             LARGE_INTEGER due;
@@ -312,6 +388,7 @@ namespace {
       pad->recording = false;
       pad->reads_mutex.unlock();
     }
+    const auto threads_after = snapshot_threads();
     const double cpu_after = process_cpu_ms();
     const auto system_after = system_times();
     double reader_after = 0;
@@ -326,6 +403,21 @@ namespace {
       cpu_after - cpu_before, wall_ms, 100.0 * (cpu_after - cpu_before) / wall_ms, reader_after - reader_before, g_injector_cpu_ms,
       100.0 * (cpu_after - cpu_before - (reader_after - reader_before) - g_injector_cpu_ms) / wall_ms,
       100.0 * (cpu_after - cpu_before - (reader_after - reader_before) - g_injector_cpu_ms) / wall_ms / static_cast<double>(pads.size()));
+    {
+      // CPU per thread over the phase: the injector and readers are the probe itself, the rest is the host path
+      std::map<std::string, std::pair<double, int>> by_name;
+      for (const auto &[tid, after] : threads_after) {
+        const auto before = threads_before.find(tid);
+        const double delta = after.cpu_ms - (before != threads_before.end() ? before->second.cpu_ms : 0.0);
+        if (delta < 0.5) continue;
+        auto &slot = by_name[after.name];
+        slot.first += delta;
+        ++slot.second;
+      }
+      std::printf("  threads:");
+      for (const auto &[name, slot] : by_name) std::printf(" %s x%d=%.1f ms (%.2f%% of one core);", name.c_str(), slot.second, slot.first, 100.0 * slot.first / wall_ms);
+      std::printf("\n");
+    }
     {
       // kernel time includes the idle time, DPCs and interrupts (usbip-win2 and the HID stack run there)
       const double idle = system_after.idle - system_before.idle;
@@ -423,6 +515,19 @@ namespace {
       // typical per-sample step of a 90 deg/s, 20 s period sine at gyro_hz samples/s, in counts
       std::printf("  pad %d: %zu reads, %.1f reads/s\n", pad->index, reads.size(), static_cast<double>(reads.size()) * 1000.0 / wall_ms);
       print_summary("interval, all reads", summarize(all), "us");
+      if (options.tap_period_ms) {
+        unsigned rises = 0, falls = 0;
+        int prev = -1;
+        for (const auto &r : reads) {
+          const int down = (r.report[8] & 0x20) != 0 ? 1 : 0;
+          if (prev == 0 && down == 1) ++rises;
+          if (prev == 1 && down == 0) ++falls;
+          prev = down;
+        }
+        std::printf("    taps (%u ms every %u ms, reader stall %u ms): injected %u, presses seen %u, releases seen %u, presses lost %d (%.1f%%)\n", options.tap_ms,
+          options.tap_period_ms, options.stall_ms, g_taps_injected, rises, falls, static_cast<int>(g_taps_injected) - static_cast<int>(rises),
+          g_taps_injected ? 100.0 * (static_cast<double>(g_taps_injected) - static_cast<double>(rises)) / static_cast<double>(g_taps_injected) : 0.0);
+      }
       if (options.inject_ms != 0 || (!options.stick_hz && !options.button_hz && !options.gyro_hz)) {
         // reads after the last injection (plus 20 ms): does the 4 ms heartbeat keep running while nothing changes?
         const double idle_from = begin_us + static_cast<double>(options.inject_ms) * 1000.0 + 20000.0;
@@ -469,7 +574,7 @@ int
 main(int argc, char **argv) {
   const unsigned pad_count = argc > 1 ? std::max(1u, std::min(4u, static_cast<unsigned>(std::strtoul(argv[1], nullptr, 10)))) : 1u;
   const unsigned phase_ms = argc > 2 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 6000u;
-  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,");
+  const std::string wanted = argc > 3 ? std::string(",") + argv[3] + "," : std::string(",sticks,buttons,gyro,mixed,stall40,stall80,stall160,idle,burstidle,sparseidle,tap0,tap80,tap120,tap160,");
   timeBeginPeriod(1);
   auto mail = std::make_shared<safe::mail_raw_t>();
   platf::ds5::native_client_t client;
@@ -512,6 +617,7 @@ main(int argc, char **argv) {
       DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, FALSE, DUPLICATE_SAME_ACCESS);
       raw->reader_handle.store(self);
       SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+      name_this_thread(L"probe-reader");
       std::array<std::uint8_t, 64> buffer {};
       auto next_stall = clock_type::now() + std::chrono::milliseconds(200);
       while (!raw->stop.load(std::memory_order_acquire)) {
@@ -542,6 +648,10 @@ main(int argc, char **argv) {
     { "idle", 0, 0, 0, 0, 0 },
     { "burstidle", 500, 0, 0, 0, 1000 },
     { "sparseidle", 0, 125, 0, 0, 1000 },
+    { "tap0", 500, 0, 0, 0, 0, 30, 70 },
+    { "tap80", 500, 0, 0, 80, 0, 30, 70 },
+    { "tap120", 500, 0, 0, 120, 0, 30, 70 },
+    { "tap160", 500, 0, 0, 160, 0, 30, 70 },
   };
   for (const auto &phase : all_phases) {
     if (wanted.find(std::string(",") + phase.name + ",") == std::string::npos) continue;
