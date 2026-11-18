@@ -112,6 +112,31 @@ if (WIN32)
 endif ()
 
 if (WIN32)
+    add_executable(ds5_pad_test_probe
+            ${CMAKE_SOURCE_DIR}/tests/tools/ds5_pad_test_probe.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/ds5/ds5_native_client.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/ds5/ds5_pad_audio.cpp
+            ${CMAKE_SOURCE_DIR}/src/remote_usb/loopback_usbip_bridge.cpp
+            ${CMAKE_SOURCE_DIR}/src/remote_usb/remote_usb_host_controller.cpp
+            ${CMAKE_SOURCE_DIR}/src/remote_usb/usbip_stale_port_sweep.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/text_encoding.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/windows/audio_default_guard.cpp
+            ${CMAKE_SOURCE_DIR}/src/ds5/tuning_profile.cpp
+            ${CMAKE_SOURCE_DIR}/src/crypto.cpp)
+    target_include_directories(ds5_pad_test_probe PRIVATE
+            "${CMAKE_SOURCE_DIR}"
+            "${CMAKE_SOURCE_DIR}/third-party"
+            ${FFMPEG_INCLUDE_DIRS}
+            "${CMAKE_SOURCE_DIR}/third-party/build-deps/dist/${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}/include")
+    target_link_libraries(ds5_pad_test_probe PRIVATE
+            sunshine_project_options sunshine_crypto Boost::log nlohmann_json::nlohmann_json
+            ${Boost_LIBRARIES} ${OPENSSL_LIBRARIES} ${PLATFORM_LIBRARIES}
+            alkaidlab_ds5_core alkaidlab_usbip_core setupapi hid ole32 winmm)
+    target_compile_options(ds5_pad_test_probe PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${SUNSHINE_COMPILE_OPTIONS}>)
+    set_target_properties(ds5_pad_test_probe PROPERTIES
+            CXX_STANDARD 23
+            LINK_SEARCH_START_STATIC 1)
     add_executable(ds5_mic_probe
             ${CMAKE_SOURCE_DIR}/tests/tools/ds5_mic_probe.cpp
             ${CMAKE_SOURCE_DIR}/src/platform/windows/capture_endpoint_recorder.cpp
