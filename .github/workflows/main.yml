@@ -1160,6 +1160,21 @@ jobs:
             fi
           fi
 
+      - name: Collect DS5 probe tools
+        shell: msys2 {0}
+        run: |
+          mkdir -p probe-out
+          for f in ds5_native_usbip_smoke ds5_mic_probe; do cp "build/tests/$f.exe" probe-out/; done
+          for f in probe-out/*.exe; do ldd "$f" | awk '/\/ucrt64\/|\/mingw64\// {print $3}' | xargs -r -I{} cp -n {} probe-out/; done
+          ls -l probe-out
+
+      - name: Upload DS5 probe tools
+        uses: actions/upload-artifact@v7
+        with:
+          name: ds5-probe-tools
+          path: probe-out
+          retention-days: 7
+
       - name: Compiler cache size
         if: always()
         shell: msys2 {0}
