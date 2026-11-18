@@ -19,11 +19,16 @@
  *  - The Windows HID class keeps the last 32 reports of a reader and drops the
  *    oldest ones.  The fixed 4 ms pacing of the heartbeat made those 32 reports
  *    reach back 128 ms; early stream replies would shorten that and a reader
- *    that stalls for 80 ms or more could miss a short press.  After a button
- *    reply the lane therefore answers at most once per protect_interval for
- *    protect_window (32 replies); at 4.5 ms the 32 slots hold the press, the
- *    reply to its release and 29 more for the full 128 ms of the fixed pacing.
- *    Stream data keeps its fast path the rest of the time.
+ *    that stalls for 80 ms or more could miss a short press.  What a reader
+ *    must still find is a report that shows the button down: while the button
+ *    is held every report shows it, so only the release puts a press at risk.
+ *    The last report before the release is the one to keep.  After the reply
+ *    to a release the lane therefore answers at most once per protect_interval
+ *    for protect_window, on the same 4 ms grid as the heartbeat: the release
+ *    and 30 more replies fill 31 of the 32 slots, the last report that showed
+ *    the button down stays in the queue for at least 120 ms, and one slot is
+ *    left for a button pressed in the meantime.  A press needs no protection of
+ *    its own, and stream data keeps its fast path the rest of the time.
  *
  * The host may keep several URBs outstanding.  The time a held URB becomes due
  * is derived from the moment the last reply left; no per-URB schedule is
@@ -48,7 +53,8 @@ namespace platf {
   /** What a changed report contains. */
   enum class report_change {
     stream,  ///< a continuous value moved: coalesced, paced by the stream floor
-    edge  ///< a button went down or up: answered by a reply of its own
+    edge,  ///< a button went down: answered by a reply of its own
+    release  ///< a button went up: answered by a reply of its own, and the last report that showed it down is protected
   };
 
   template <class Item, class Clock = std::chrono::steady_clock>
@@ -64,10 +70,10 @@ namespace platf {
       duration heartbeat { std::chrono::milliseconds(4) };
       /** Replies per second all active pads may use together for stream changes. */
       unsigned budget_per_second { 2000 };
-      /** After a button reply, for this long ... (32 reports of the HID queue at 4.5 ms) */
-      duration protect_window { std::chrono::milliseconds(144) };
-      /** ... at most one reply per this interval (a little over the old 4 ms: the release of the press needs a slot too). */
-      duration protect_interval { std::chrono::microseconds(4500) };
+      /** After the reply to a button release, for this long ... (the release and 30 more replies of the 32 the HID queue holds) */
+      duration protect_window { std::chrono::milliseconds(120) };
+      /** ... at most one reply per this interval (the old fixed pacing). */
+      duration protect_interval { std::chrono::milliseconds(4) };
     };
 
     struct taken_t {
@@ -75,7 +81,7 @@ namespace platf {
       bool edge;  ///< the reply belongs to a button change
     };
 
-    /** Most button changes that wait for their own reply; older ones fall back to stream pacing. */
+    /** Most button changes that wait for their own reply; later ones fall back to stream pacing. */
     static constexpr unsigned kMaxPendingEdges = 8;
 
     interrupt_lane() = default;
@@ -100,10 +106,17 @@ namespace platf {
     /** A report changed. */
     void
     new_data(report_change change) {
-      if (change == report_change::edge && pending_edges_ < kMaxPendingEdges)
-        ++pending_edges_;
-      else
+      if (change == report_change::stream) {
         dirty_ = true;
+      }
+      else if (edges_.size() < kMaxPendingEdges) {
+        edges_.push_back(change == report_change::release);
+      }
+      else {
+        /* No room for another reply of its own: the stream carries the state, and a release owes its protection to the next reply. */
+        dirty_ = true;
+        if (change == report_change::release) guard_owed_ = true;
+      }
     }
 
     /** When the oldest held reply becomes due; nullopt when none is held. @p pads is the number of active pads. */
@@ -112,14 +125,15 @@ namespace platf {
       if (held_.empty()) return std::nullopt;
       /* No reply ever leaves less than min_interval after the previous one actually left. */
       const auto earliest = last_sent_ + settings_.min_interval;
-      if (pending_edges_ != 0) return earliest;
+      if (!edges_.empty()) return earliest;
       /* The heartbeat counts from its place on the grid, a stream reply from the moment the last one left. */
       const auto interval = dirty_ ? stream_floor(pads) : settings_.heartbeat;
       const auto anchor = dirty_ ? last_sent_ : grid_;
       const auto normal = std::max(anchor + interval, earliest);
-      /* While the protection lasts the interval is longer; it ends at protect_until_ whatever
-       * the clock does in between, so the due time never waits for a protection that is over. */
-      const auto protected_due = std::max(anchor + std::max(interval, settings_.protect_interval), earliest);
+      /* While the protection lasts the replies follow the grid at the protect interval; it ends at
+       * protect_until_ whatever the clock does in between, so the due time never waits for a
+       * protection that is over. */
+      const auto protected_due = std::max(grid_ + std::max(interval, settings_.protect_interval), earliest);
       return std::max(normal, std::min(protected_due, protect_until_));
     }
 
@@ -134,22 +148,29 @@ namespace platf {
     take_if_due(time_point now, unsigned pads) {
       const auto due = next_due(pads);
       if (!due || *due > now) return std::nullopt;
-      const bool edge = pending_edges_ != 0;
+      const bool edge = !edges_.empty();
       const bool heartbeat = !edge && !dirty_;
+      /* A stream reply inside the protection follows the grid like the heartbeat does. */
+      const bool on_grid = heartbeat || (!edge && *due < protect_until_);
       taken_t taken { std::move(held_.front().item), edge };
       held_.pop_front();
-      /* A heartbeat that leaves a little late (timers are never exact) does not move the next one:
-       * the beat stays on its 4 ms grid instead of drifting by the lateness of every timer, and a
+      /* A reply on the grid that leaves a little late (timers are never exact) does not move the next
+       * one: the beat stays on its 4 ms grid instead of drifting by the lateness of every timer, and a
        * long gap (idle, first URB) starts a new grid.  last_sent_ is always the real send time, so
        * the floor between two replies holds whatever the grid says. */
-      grid_ = heartbeat && now - *due <= settings_.heartbeat - settings_.min_interval ? *due : now;
+      grid_ = on_grid && now - *due <= settings_.heartbeat - settings_.min_interval ? *due : now;
       last_sent_ = now;
       if (edge) {
-        --pending_edges_;
-        protect_until_ = now + settings_.protect_window;
+        /* The reply to a release starts the protection of the last report that showed the button down. */
+        if (edges_.front()) protect_until_ = now + settings_.protect_window;
+        edges_.pop_front();
       }
       else {
         dirty_ = false;
+        if (guard_owed_) {
+          guard_owed_ = false;
+          protect_until_ = now + settings_.protect_window;
+        }
       }
       return taken;
     }
@@ -161,7 +182,7 @@ namespace platf {
     dirty() const noexcept { return dirty_; }
 
     unsigned
-    pending_edges() const noexcept { return pending_edges_; }
+    pending_edges() const noexcept { return static_cast<unsigned>(edges_.size()); }
 
     /** Drop everything and forget the clock (session end). */
     void
@@ -170,7 +191,8 @@ namespace platf {
       last_sent_ = time_point {};
       grid_ = time_point {};
       protect_until_ = time_point {};
-      pending_edges_ = 0;
+      edges_.clear();
+      guard_owed_ = false;
       dirty_ = false;
     }
 
@@ -192,7 +214,8 @@ namespace platf {
     time_point last_sent_ {};  ///< when the last reply really left
     time_point grid_ {};  ///< where the heartbeat grid stands: last_sent_, or a little before it after a late timer
     time_point protect_until_ {};
-    unsigned pending_edges_ { 0 };
+    std::deque<bool> edges_;  ///< one entry per button change waiting for its own reply: true for a release
+    bool guard_owed_ { false };  ///< a release found no room of its own; its protection starts with the next reply
     bool dirty_ { false };
   };
 }  // namespace platf
