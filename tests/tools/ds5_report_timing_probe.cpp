@@ -623,6 +623,11 @@ main(int argc, char **argv) {
   ds5::tuning::store_t tuning_store(temp);
   tuning_store.load();
   if (const auto *cap = std::getenv("ALK_PROBE_MOTION_CAP")) save_motion_cap(tuning_store, static_cast<unsigned>(std::strtoul(cap, nullptr, 10)));
+  /* ALK_PROBE_INPUT_RATE=auto|hz500|hz250: key 107 as saved before the pads are allocated. */
+  if (const auto *rate = std::getenv("ALK_PROBE_INPUT_RATE")) {
+    const auto saved = tuning_store.apply_json({ { "schema", "ALK-DS5T/1" }, { "values", { { "ds5.compat.inputReportRate", std::string(rate) } } } });
+    std::printf("INPUT_RATE saved %s: %s\n", rate, saved.ok ? "ok" : saved.error.c_str());
+  }
   platf::ds5::native_client_t client;
   std::vector<platf::feedback_queue_t> queues;
   for (unsigned index = 0; index != pad_count; ++index) {
