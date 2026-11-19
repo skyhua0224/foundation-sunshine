@@ -132,6 +132,163 @@ function Wait-UninstallSecondPhase([string]$AppDir, [string]$Phase) {
     throw "$Phase second phase still running after $TimeoutSeconds seconds (PID $($pending.ProcessId -join ',')); an uninstall prompt is probably waiting for input."
 }
 
+
+function Invoke-InstallerExpecting([string]$Arguments, [string]$Phase, [scriptblock]$ExitCodeOk) {
+    # An update that must be refused or that fails on purpose: the exit code is part of the contract.
+    $process = Start-Process -FilePath $Installer -ArgumentList $Arguments -PassThru
+    $record = [pscustomobject]@{ phase = $Phase; pid = $process.Id; exit_code = $null; passed = $false }
+    $results.Add($record)
+    Write-Host "$Phase started PID $($process.Id)"
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            throw "$Phase timed out after $TimeoutSeconds seconds (PID $($process.Id))."
+        }
+        $record.exit_code = $process.ExitCode
+        if (-not (& $ExitCodeOk $process.ExitCode)) { throw "$Phase exited $($process.ExitCode), which is not what the contract allows." }
+        $record.passed = $true
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-Manifest([string]$Folder, [string[]]$Relative) {
+    # Relative path -> SHA-256 of every file below the given entries.
+    $manifest = [ordered]@{}
+    # The runner's TEMP can be spelled with 8.3 names (RUNNER~1) while Get-ChildItem returns the long
+    # ones, so cut the prefix off the resolved folder, not off the text the caller passed.
+    $resolved = (Get-Item -LiteralPath $Folder).FullName.TrimEnd('\')
+    foreach ($item in $Relative) {
+        $path = Join-Path $Folder $item
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            Get-ChildItem -LiteralPath $path -Recurse -File | Sort-Object FullName | ForEach-Object {
+                $manifest[$_.FullName.Substring($resolved.Length).TrimStart('\')] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            }
+        } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+            $manifest[$item] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+    }
+    return $manifest
+}
+
+function Assert-SameManifest($Expected, $Actual, [string]$Phase, [string]$What) {
+    $a = ConvertTo-Json -InputObject $Expected -Depth 3
+    $b = ConvertTo-Json -InputObject $Actual -Depth 3
+    if ($a -ne $b) {
+        $missing = @($Expected.Keys | Where-Object { -not $Actual.Contains($_) })
+        $changed = @($Expected.Keys | Where-Object { $Actual.Contains($_) -and $Actual[$_] -ne $Expected[$_] })
+        throw "$Phase`: $What differs from before the update ($($missing.Count) missing, $($changed.Count) changed, $($Actual.Count) of $($Expected.Count) present)."
+    }
+}
+
+function Stop-TestService([string]$Phase) {
+    # Only the service this install created. Authority: installer-ms-stop-service-20261118 (-NoWait).
+    $service = Get-Service -Name SunshineService -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -eq 'Stopped') { return }
+    Stop-Service -Name SunshineService -NoWait
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Get-Service -Name SunshineService).Status -ne 'Stopped') {
+        if ([DateTime]::UtcNow -ge $deadline) { throw "$Phase`: the test service did not stop." }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Stop-PathProcesses([string]$Path) {
+    # By image path, so only what this test started from the folder under test.
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -ieq $Path } | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Test-UpdateSafety {
+    # The update that failed on a user's machine: the Control Panel's own updater ran the installer
+    # silently while a program of the folder still ran, the copy of sunshine-gui.exe failed, Setup
+    # rolled back, and the rollback removed the Web UI folder it had just created. Every case below
+    # ends with the Web UI folder of the installation that was there before.
+    $app = Join-Path $testRoot 'update safety'
+    $common = '/VERYSILENT /SUPPRESSMSGBOXES /SP- /NORESTART /LANG=english /TYPE=custom /COMPONENTS=application,assets,gui /TASKS= ' + "/DIR=`"$app`""
+    $kept = @('assets\web', 'sunshine.exe', 'scripts', 'assets\gui\sunshine-gui.exe')
+    $gui = Join-Path $app 'assets\gui\sunshine-gui.exe'
+    $previous = Join-Path $app 'assets\web.previous'
+    $supervisor = $null
+    $lock = $null
+    $blocker = Join-Path $app 'scripts\update-path.bat'
+    $blockerBackup = Join-Path $testRoot 'update-path.bat.kept'
+    try {
+        Invoke-BoundedProcess -File $Installer -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-fresh.log')`"" -Phase 'update-fresh'
+        Stop-TestService 'update-fresh'
+        # the service started the real Control Panel of this folder: it holds the file the next steps replace
+        Stop-PathProcesses $gui
+        Start-Sleep -Seconds 1
+        $before = Get-Manifest $app $kept
+        if (-not (Test-Path -LiteralPath (Join-Path $app 'assets\web\index.html'))) { throw 'update-fresh: no Web UI folder to protect.' }
+
+        # A. A program of the folder is running (what the updater of an older Control Panel leaves behind).
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $gui -Force
+        $stub = Start-Process -FilePath $gui -ArgumentList '-t', '127.0.0.1' -PassThru -WindowStyle Hidden
+        Invoke-BoundedProcess -File $Installer -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-running.log')`"" -Phase 'update-running-program'
+        if (-not $stub.HasExited) { throw 'update-running-program: the program of the folder was not ended.' }
+        Stop-TestService 'update-running-program'
+        Assert-SameManifest $before (Get-Manifest $app $kept) 'update-running-program' 'the installed files'
+        if (Test-Path -LiteralPath $previous) { throw 'update-running-program: the old Web UI folder was left behind.' }
+
+        # B. A file of the folder is held by something else: refused before anything changes.
+        $lock = [IO.File]::Open($blocker, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        Invoke-InstallerExpecting -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-held.log')`"" -Phase 'update-held-file' -ExitCodeOk { param($code) $code -eq 7 }
+        $lock.Dispose(); $lock = $null
+        Assert-SameManifest $before (Get-Manifest $app $kept) 'update-held-file' 'the installed files after a refused update'
+        if (Test-Path -LiteralPath $previous) { throw 'update-held-file: a refused update moved the Web UI folder aside.' }
+
+        # C. The program of the folder is started again as fast as it is ended. The update cannot
+        #    win that; it must say so before it copies anything instead of failing in the middle.
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination $gui -Force
+        $guard = "while (`$true) { if (-not (Get-Process -Name 'sunshine-gui' -ErrorAction SilentlyContinue)) { Start-Process -FilePath '$gui' -ArgumentList '-t','127.0.0.1' -WindowStyle Hidden }; Start-Sleep -Milliseconds 700 }"
+        $supervisor = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList '-NoProfile', '-Command', $guard -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 2
+        Invoke-InstallerExpecting -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-respawn.log')`"" -Phase 'update-respawning-program' -ExitCodeOk { param($code) $code -eq 7 }
+        $supervisor | Stop-Process -Force
+        $supervisor = $null
+        Stop-PathProcesses $gui
+        Start-Sleep -Seconds 1
+        # the folder is the one the test made (ping under the name of the program), not the installer's file
+        $afterRespawn = Get-Manifest $app @('assets\web', 'sunshine.exe', 'scripts')
+        $expectedRespawn = [ordered]@{}
+        foreach ($key in @($before.Keys)) { if ($key -ne 'assets\gui\sunshine-gui.exe') { $expectedRespawn[$key] = $before[$key] } }
+        Assert-SameManifest $expectedRespawn $afterRespawn 'update-respawning-program' 'the installed files after a refused update'
+        if (Test-Path -LiteralPath $previous) { throw 'update-respawning-program: a refused update moved the Web UI folder aside.' }
+
+        # D. The copy fails after the Web UI folder was moved aside (a directory stands where a file
+        #    has to go). Setup rolls back; the old folder must be back.
+        Move-Item -LiteralPath $blocker -Destination $blockerBackup -Force
+        New-Item -ItemType Directory -Path $blocker -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $blocker 'occupied.txt') -Value 'a folder where the installer needs a file'
+        Invoke-InstallerExpecting -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-failing-copy.log')`"" -Phase 'update-failing-copy' -ExitCodeOk { param($code) $code -ne 0 -and $code -ne 7 }
+        Stop-TestService 'update-failing-copy'
+        $webNow = Get-Manifest $app @('assets\web')
+        $webBefore = [ordered]@{}
+        foreach ($key in @($before.Keys)) { if (([string]$key).StartsWith('assets\web\', [StringComparison]::OrdinalIgnoreCase)) { $webBefore[$key] = $before[$key] } }
+        Assert-SameManifest $webBefore $webNow 'update-failing-copy' 'the Web UI folder after a failed update'
+        if (Test-Path -LiteralPath $previous) { throw 'update-failing-copy: the old Web UI folder was left beside the restored one.' }
+
+        # E. A Setup that was killed after it moved the folder aside: the next update puts it back
+        #    and finishes the job.
+        Remove-Item -LiteralPath $blocker -Recurse -Force
+        Move-Item -LiteralPath $blockerBackup -Destination $blocker -Force
+        Move-Item -LiteralPath (Join-Path $app 'assets\web') -Destination $previous -Force
+        Invoke-BoundedProcess -File $Installer -Arguments "$common /LOG=`"$(Join-Path $EvidenceDirectory 'update-after-kill.log')`"" -Phase 'update-after-interrupted-run'
+        Stop-TestService 'update-after-interrupted-run'
+        Assert-SameManifest $before (Get-Manifest $app $kept) 'update-after-interrupted-run' 'the installed files'
+        if (Test-Path -LiteralPath $previous) { throw 'update-after-interrupted-run: the old Web UI folder was left behind.' }
+
+        $results.Add([pscustomobject]@{ phase = 'update-safety'; passed = $true; web_files = $webBefore.Count })
+        Write-Host "PASS update safety: a running program is ended, a held file or a program that returns is refused before any change, a failed copy and an interrupted run leave the Web UI folder ($($webBefore.Count) files) as it was."
+        $uninstallLog = Join-Path $EvidenceDirectory 'update-safety-uninstall.log'
+        Invoke-BoundedProcess -File (Join-Path $app 'unins000.exe') -Arguments "/VERYSILENT /NORESTART /LOG=`"$uninstallLog`"" -Phase 'update-safety-uninstall'
+        Wait-UninstallSecondPhase -AppDir $app -Phase 'update-safety-uninstall'
+    } finally {
+        if ($lock) { $lock.Dispose() }
+        if ($supervisor) { $supervisor | Stop-Process -Force -ErrorAction SilentlyContinue }
+        Stop-PathProcesses $gui
+    }
+}
+
 try {
     Assert-CleanMachine
     # Spaces exercise Inno's command-line quoting. Keep logs outside the
@@ -195,6 +352,9 @@ try {
         $results.Add([pscustomobject]@{ phase = "$mode-retention"; passed = $true; files = $hashes })
         Write-Host "PASS ${mode}: install/uninstall exit 0; binaries and registration removed; four user files unchanged."
     }
+    # The update path: what a failed or refused update leaves behind. A fresh clean machine again.
+    Test-UpdateSafety
+    Assert-CleanMachine
 } finally {
     ConvertTo-Json -InputObject $results.ToArray() -Depth 5 |
         Set-Content -LiteralPath (Join-Path $EvidenceDirectory 'results.json') -Encoding utf8
