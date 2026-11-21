@@ -169,8 +169,12 @@ MinGW 构建不产生 PDB。Windows 构建加了 `-g1` 和 `-Wl,--build-id`（`c
 strip 和签名都不会改变它，崩溃转储（minidump）靠它找到符号。
 
 - 打包时 `scripts/ci/make-symbols.py` 用 `dump_syms`（固定版本和 SHA-256）读未 strip 的模块里的 DWARF，生成 Breakpad 符号，
-  存成 `<模块名>/<调试 ID>/<模块名>.sym`，连同 `symbols-manifest.json` 打成 `Sunshine.<版本>.Symbols-x64.zip`，作为发布资产和工件上传；
-  随后把安装包和便携包里仍带 DWARF 的模块 `strip` 掉，所以安装包不带 DWARF：没有符号的模块也会被 strip，并记进 `symbols-manifest.json` 的 `stripped_without_symbols`；带数字签名的模块不动（strip 会破坏签名），记进 `kept_signed_with_debug_info`，打包日志里有一条警告。安装器外壳在链接时就去掉调试信息。
+  存成 `<模块名>/<调试 ID>/<模块名>.sym`，连同 `symbols-manifest.json` 打成 `Sunshine.<版本>.Symbols-x64.zip`，作为发布资产和工件上传。
+- 符号打包后，安装包和便携包里不再需要调试数据的模块会被清掉：`tools/pe_symbols.py` 截掉链接器写在文件末尾的 COFF 符号表，
+  `strip --strip-debug` 去掉 DWARF（两者都不在加载时使用，CodeView GUID 保留）。没有符号的模块也会被清掉，记进
+  `symbols-manifest.json` 的 `stripped_without_symbols` 与 `stripped_coff_symbols`。带数字签名的模块不动（改一个字节就会使签名失效），
+  记进 `kept_signed_with_debug_info` / `kept_signed_with_coff_symbols`，打包日志里有一条警告。安装器外壳和 setup UI 也在写入
+  `append_installer_payload.py` 的页脚之前按同一规则去掉 COFF 符号表。
 - `sunshine.exe` 或 `sunshinesvc.exe` 没有符号时打包失败。
 - 发布里的符号包活不长：自动预发布只保留最新两个（`LizardByte/create-release-action` 的 `keepPreReleaseCount`），旧的连同资产一起删除，一天构建好几次，
   多数版本的 `Symbols-x64.zip` 几小时后就没了，崩溃转储只能显示模块加偏移。所以每次构建把这个包再单独上传一次，工件名 `sunshine-symbols-<版本号>`
