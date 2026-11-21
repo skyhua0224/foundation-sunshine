@@ -752,13 +752,21 @@ namespace proc {
     if (configured.empty()) return {};
     // only an image is served: the configured path is the host administrator's, the client asks by name
     if (!client_interface::is_art_extension(file_handler::path_from_utf8(configured).extension().string())) return {};
-    const std::array paths {
-      file_handler::path_from_utf8(SUNSHINE_ASSETS_DIR) / file_handler::path_from_utf8(configured),
-      platf::appdata() / "covers" / file_handler::path_from_utf8(configured),
-      file_handler::path_from_utf8(configured),
+    const auto name = file_handler::path_from_utf8(configured);
+    const auto webp = file_handler::path_from_utf8(client_interface::art_webp_fallback(configured));
+    const std::array roots {
+      file_handler::path_from_utf8(SUNSHINE_ASSETS_DIR),
+      platf::appdata() / "covers",
+      std::filesystem::path {},
     };
-    for (const auto &path : paths) {
-      if (std::filesystem::exists(path)) return file_handler::path_to_utf8(path);
+    for (const auto &root : roots) {
+      // A path written before the bundled heroes became WebP names the PNG; try the WebP of the same stem next
+      // (fs-rfc9649-webp-20261122, container and image data).
+      for (const auto &candidate : { name, webp }) {
+        if (candidate.empty()) continue;
+        const auto path = root / candidate;
+        if (std::filesystem::exists(path)) return file_handler::path_to_utf8(path);
+      }
     }
     return {};
   }

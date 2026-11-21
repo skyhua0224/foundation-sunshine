@@ -5,7 +5,7 @@
       "name": "桌面",
       "default-id": "desktop",
       "image-path": "desktop",
-      "hero": "desktop-hero.png",
+      "hero": "desktop-hero.webp",
       "exclude-global-prep-cmd": "false",
       "elevated": "",
       "auto-detach": "true",
@@ -30,7 +30,7 @@
       "name": "大屏",
       "default-id": "big-screen",
       "image-path": "bigscreen.png",
-      "hero": "bigscreen-hero.png",
+      "hero": "bigscreen-hero.webp",
       "fs-kind": "bigscreen",
       "fs-default": "true",
       "exclude-global-prep-cmd": "false",
@@ -55,7 +55,7 @@
       "auto-detach": "true",
       "wait-all": "true",
       "image-path": "steam.png",
-      "hero": "steam-hero.png"
+      "hero": "steam-hero.webp"
     },
     {
       "name": "Xbox 游戏",
@@ -64,7 +64,7 @@
       "auto-detach": "true",
       "wait-all": "true",
       "image-path": "box.png",
-      "hero": "box-hero.png"
+      "hero": "box-hero.webp"
     }
   ],
   "default-apps-seen": [

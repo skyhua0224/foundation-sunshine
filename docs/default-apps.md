@@ -9,7 +9,9 @@ interface, served to clients as `/appasset?type=hero` and listed in `FsArt`). Ei
 host's `assets` folder, then in the `covers` folder of the application data (where the Web UI puts an upload), then as an absolute path.
 The editor (Applications -> an application -> Image Settings) has a slot for each: 竖版封面 / Portrait cover (2:3) and 横版封面 / Landscape cover (16:9).
 
-The default entries ship both: `steam.png` + `steam-hero.png`, `box.png` + `box-hero.png`, `desktop` (the wallpaper) + `desktop-hero.png`, `bigscreen.png` + `bigscreen-hero.png`.
+The default entries ship both: `steam.png` + `steam-hero.webp`, `box.png` + `box-hero.webp`, `desktop` (the wallpaper) + `desktop-hero.webp`, `bigscreen.png` + `bigscreen-hero.webp`.
+The landscape covers are WebP (the same 1920x1080 pixels, 27-87% smaller per file, 81% across the four). An `apps.json` written before that change still names the
+PNG; the host accepts the WebP of the same stem for it, so an upgrade keeps its art.
 Sources and terms of the art: `assets/brand/default-apps/README.md`.
 
 ## Names follow the language

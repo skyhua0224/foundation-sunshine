@@ -67,6 +67,13 @@ TEST(ClientInterface, OnlyImagesAreArt) {
   for (const char *extension : { "", ".json", ".exe", ".txt", ".conf" }) EXPECT_FALSE(client_interface::is_art_extension(extension)) << extension;
 }
 
+TEST(ClientInterface, APngArtPathAlsoFindsItsWebpReplacement) {
+  EXPECT_EQ(client_interface::art_webp_fallback("desktop-hero.png"), "desktop-hero.webp");
+  EXPECT_EQ(client_interface::art_webp_fallback("C:\\covers\\a.PNG"), "C:\\covers\\a.webp");
+  EXPECT_EQ(client_interface::art_webp_fallback("a.webp"), "");
+  EXPECT_EQ(client_interface::art_webp_fallback("noext"), "");
+}
+
 TEST(ClientInterface, ASessionCountsForItsSpanAndNeverForASessionTheHostLost) {
   EXPECT_EQ(client_interface::measured_session_seconds(1000, 1600, 5), 600);
   EXPECT_EQ(client_interface::measured_session_seconds(0, 1600, 90), 90) << "no start recorded: the fallback";

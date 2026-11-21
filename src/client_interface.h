@@ -374,6 +374,15 @@ namespace client_interface {
            normalized == ".svg";
   }
 
+  /// The same art path with a WebP extension when it names a PNG. An apps.json written before the bundled heroes became
+  /// WebP keeps naming the PNG; the host tries this path after the configured one, so an upgrade keeps its art.
+  inline std::string
+  art_webp_fallback(std::string_view path) {
+    const auto dot = path.rfind('.');
+    if (dot == std::string_view::npos || lower(path.substr(dot)) != ".png") return {};
+    return std::string { path.substr(0, dot) } + ".webp";
+  }
+
   /// How many seconds a session counts for. A start that was recorded gives the span to `now`, unless it is older than a week (the host went down during that session and never
   /// recorded the end: the span is not play time); without a start the fallback (the host's own clock of the launch) counts, at most a day, never negative.
   inline std::int64_t

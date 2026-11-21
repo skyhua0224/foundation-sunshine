@@ -11,13 +11,24 @@ const pngSize = (url) => {
   assert.equal(head.subarray(1, 4).toString('latin1'), 'PNG')
   return [head.readUInt32BE(16), head.readUInt32BE(20)]
 }
+// A simple lossy WebP ("VP8 ") and an extended one ("VP8X", e.g. with alpha) both state the canvas size.
+const webpSize = (url) => {
+  const head = readFileSync(url).subarray(0, 32)
+  assert.equal(head.subarray(0, 4).toString('latin1'), 'RIFF')
+  assert.equal(head.subarray(8, 12).toString('latin1'), 'WEBP')
+  const chunk = head.subarray(12, 16).toString('latin1')
+  if (chunk === 'VP8X') return [head.readUIntLE(24, 3) + 1, head.readUIntLE(27, 3) + 1]
+  assert.equal(chunk, 'VP8 ')
+  assert.equal(head.subarray(23, 26).toString('hex'), '9d012a')
+  return [head.readUInt16LE(26) & 0x3fff, head.readUInt16LE(28) & 0x3fff]
+}
 const locate = (name) => (existsSync(new URL(name, windowsAssets)) ? new URL(name, windowsAssets) : new URL(name, commonAssets))
 
 const EXPECT = {
-  desktop: { hero: 'desktop-hero.png', en: 'Desktop', zh: '桌面' },
-  'big-screen': { hero: 'bigscreen-hero.png', en: 'Big Screen', zh: '大屏' },
-  steam: { hero: 'steam-hero.png', en: 'Steam Big Picture', zh: 'Steam Big Picture 模式' },
-  xbox: { hero: 'box-hero.png', en: 'Xbox Game', zh: 'Xbox 游戏' },
+  desktop: { hero: 'desktop-hero.webp', en: 'Desktop', zh: '桌面' },
+  'big-screen': { hero: 'bigscreen-hero.webp', en: 'Big Screen', zh: '大屏' },
+  steam: { hero: 'steam-hero.webp', en: 'Steam Big Picture', zh: 'Steam Big Picture 模式' },
+  xbox: { hero: 'box-hero.webp', en: 'Xbox Game', zh: 'Xbox 游戏' },
 }
 
 for (const [file, lang] of [['apps.json', 'en'], ['apps.zh.json', 'zh']]) {
@@ -37,7 +48,7 @@ for (const [file, lang] of [['apps.json', 'en'], ['apps.zh.json', 'zh']]) {
 
 test('the covers of the default entries have the aspect that they are named for', () => {
   for (const name of ['steam.png', 'box.png']) assert.deepEqual(pngSize(locate(name)), [600, 900], name)
-  for (const name of ['steam-hero.png', 'box-hero.png', 'desktop-hero.png', 'bigscreen-hero.png']) assert.deepEqual(pngSize(locate(name)), [1920, 1080], name)
+  for (const name of ['steam-hero.webp', 'box-hero.webp', 'desktop-hero.webp', 'bigscreen-hero.webp']) assert.deepEqual(webpSize(locate(name)), [1920, 1080], name)
 })
 
 test('the art has a record: sources and terms in the assets README and the source index', () => {

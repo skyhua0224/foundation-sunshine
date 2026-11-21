@@ -303,7 +303,7 @@ TEST(DefaultAppNames, AnOldFileIsMarkedOnceAndOnlyWhereTheNameIsADefaultName) {
   // "Steam" is the person's name: not marked, so it never follows; the rest of the defaults are
   EXPECT_EQ(marks, (std::vector<std::string> { "desktop", "desktop", "-", "xbox", "-" }));
   const auto &first = tree.get_child("apps").begin()->second;
-  EXPECT_EQ(first.get<std::string>("hero"), "desktop-hero.png");
+  EXPECT_EQ(first.get<std::string>("hero"), "desktop-hero.webp");
   EXPECT_FALSE(default_apps::stamp_defaults(tree)) << "marked once";
   // a marked entry whose hero the person cleared does not get it back
   for (auto &[_, app] : tree.get_child("apps")) app.erase("hero");
@@ -317,7 +317,7 @@ TEST(DefaultAppNames, AnOldFileIsMarkedOnceAndOnlyWhereTheNameIsADefaultName) {
 TEST(DefaultAppNames, TheBigScreenEntryIsMarkedAndShipsItsLandscapeCover) {
   const auto app = default_apps::big_screen_app(true);
   EXPECT_EQ(app.get<std::string>("default-id"), "big-screen");
-  EXPECT_EQ(app.get<std::string>("hero"), "bigscreen-hero.png");
+  EXPECT_EQ(app.get<std::string>("hero"), "bigscreen-hero.webp");
   EXPECT_EQ(app.get<std::string>("name"), "大屏");
   pt::ptree tree;
   tree.add_child("apps", pt::ptree {}).push_back({ "", app });

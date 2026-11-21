@@ -1,9 +1,10 @@
 # Default app artwork: provenance and terms
 
-Where the files live: `steam.png`, `steam-hero.png`, `box.png`, `box-hero.png` in `src_assets/common/assets/`; `desktop-hero.png` and
-`bigscreen-hero.png` in `src_assets/windows/assets/`. Every one is installed into the host's `assets` folder; the `*-hero.png` ones are the
+Where the files live: `steam.png`, `steam-hero.webp`, `box.png`, `box-hero.webp` in `src_assets/common/assets/`; `desktop-hero.webp` and
+`bigscreen-hero.webp` in `src_assets/windows/assets/`. Every one is installed into the host's `assets` folder; the `*-hero.webp` ones are the
 `hero` of the default entries of apps.json (served to clients as `/appasset?type=hero`), the others are their `image-path`.
-Regenerating: `python3 -I build_svgs.py && sh render.sh` in this folder writes the SVGs to `svg/` and the PNGs next to the script; copy them to the folders above.
+Regenerating: `python3 -I build_svgs.py && sh render.sh` in this folder writes the SVGs to `svg/`, the posters as PNG and the
+landscape covers as WebP (quality 92, method 6) next to the script; copy them to the folders above.
 The downloaded official files (`sources/`: Valve's EPS and PDF, saved pages) are not committed (size); their URLs and sha256 are below and in
 `docs/authority/source-index.tsv`.
 
@@ -29,11 +30,11 @@ Foundation Sunshine is not affiliated with, sponsored by or endorsed by Valve or
 | file | size | what | source svg | sha256 | bytes |
 |---|---|---|---|---|---|
 | `steam.png` | 600x900 | Steam Big Picture poster: blue-teal field (#1b2838 -> #2a475e -> #3b6a8c, #66c0f4 glow), official inverse steam(R) logo centred | `svg/steam.svg` | caed5185fc917963b1acc168d3a66863ad90bf5dedd3c80e67f833b7cda03126 | 107388 |
-| `steam-hero.png` | 1920x1080 | same, 16:9 | `svg/steam-hero.svg` | fc935c5314f46744b6ad28557b0d1be9172147de1896d1a0d08abb9dacf408db | 310304 |
+| `steam-hero.webp` | 1920x1080 | same, 16:9, WebP | `svg/steam-hero.svg` | fc935c5314f46744b6ad28557b0d1be9172147de1896d1a0d08abb9dacf408db | 33664 |
 | `box.png` | 600x900 | Xbox Game poster: green field (#0b3d0b -> #107C10, lighter glow), white Xbox sphere centred | `svg/box.svg` | 890a5989a7586fe8a3e4858218cb6af6f070bb0b073541736266bcb83944a1df | 69952 |
-| `box-hero.png` | 1920x1080 | same, 16:9 | `svg/box-hero.svg` | b0f2bb1d8e8422d65c6d74fb9b4fe988eb4c8426c28b4acb54393da623086a86 | 205290 |
-| `desktop-hero.png` | 1920x1080 | Desktop: same dark grey gradient (#212121 -> #757575) and monitor line icon as `desktop.png`, icon left, outlined uppercase DESKTOP right | `svg/desktop-hero.svg` | 67edfdbe756574345b8ec56ceb582975bb4a9181919c75acc33cd041290c67db | 48997 |
-| `bigscreen-hero.png` | 1920x1080 | Big Screen landscape: TV with the mascot on the left, game controller on the right; same shapes, palette and glow as `bigscreen-cover.svg`, re-arranged, nothing cropped | `svg/bigscreen-hero.svg` | 182ed84a5171a35a8409578cb0fbf5e6ecf7b0ad6329273f22101609bf683d0f | 239609 |
+| `box-hero.webp` | 1920x1080 | same, 16:9, WebP | `svg/box-hero.svg` | b0f2bb1d8e8422d65c6d74fb9b4fe988eb4c8426c28b4acb54393da623086a86 | 31216 |
+| `desktop-hero.webp` | 1920x1080 | Desktop: same dark grey gradient (#212121 -> #757575) and monitor line icon as `desktop.png`, icon left, outlined uppercase DESKTOP right; WebP | `svg/desktop-hero.svg` | 67edfdbe756574345b8ec56ceb582975bb4a9181919c75acc33cd041290c67db | 15954 |
+| `bigscreen-hero.webp` | 1920x1080 | Big Screen landscape: TV with the mascot on the left, game controller on the right; same shapes, palette and glow as `bigscreen-cover.svg`, re-arranged, nothing cropped; WebP | `svg/bigscreen-hero.svg` | 182ed84a5171a35a8409578cb0fbf5e6ecf7b0ad6329273f22101609bf683d0f | 48506 |
 | `contact.png` | 2400x1080 | review sheet only, not an app asset | - | 42586e5e4a7ddab35736dcbb3540d6344d9a9ba8d61c84bb84636f2bcafc036e | - |
 
 The Big Screen mascot (the 薇薇 / Foundation Sunshine logo, a raster `<image>` embedded in the original
@@ -82,7 +83,7 @@ Everything else in `bigscreen-hero.svg` is the original vector shapes.
 - The only public official Xbox graphic found, https://developer.microsoft.com/content/dam/microsoftgamedev/new/XboxSphere_1.png
   (`sources/XboxSphere_1.png`, 375x373 RGBA raster, sha256 8c455c73b5895ce9e94fa89d5d3bd3c92f05722407f50ca71884397ad0d10afc),
   is an old glossy green 3D raster, not the flat mono mark and not a vector, so it was not used and not traced.
-- FALLBACK used in `box.png` and `box-hero.png`: the Xbox sphere path from simple-icons 16.37.0,
+- FALLBACK used in `box.png` and `box-hero.webp`: the Xbox sphere path from simple-icons 16.37.0,
   https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/xbox.svg (`sources/simple-icons-xbox_latest.svg`,
   sha256 c5ec61839e921542b3581d9aab7d72b822200975c4b508ea4f9bc02ce4c6f025, licence CC0-1.0 per `sources/simple-icons_LICENSE.md`
   and `sources/simple-icons_package.json`). It is a third-party redraw of the Microsoft mark. It is used unaltered in white

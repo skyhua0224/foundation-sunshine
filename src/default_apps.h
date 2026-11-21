@@ -39,7 +39,7 @@ namespace default_apps {
   /// The cover of the entry, in the assets folder.
   inline constexpr auto big_screen_cover = "bigscreen.png"sv;
   /// The landscape cover of the entry (the `hero` of the entry, served as /appasset?type=hero).
-  inline constexpr auto big_screen_hero = "bigscreen-hero.png"sv;
+  inline constexpr auto big_screen_hero = "bigscreen-hero.webp"sv;
   /// The key of an app that names which default entry it is ("desktop", "steam", "xbox", "big-screen"). While the name still is one of that entry's names it follows the language; a name the person wrote stays.
   inline constexpr auto default_id_key = "default-id"sv;
   inline constexpr auto desktop_id = "desktop"sv;
@@ -148,9 +148,9 @@ namespace default_apps {
   /// The landscape cover that a default entry ships.
   inline std::string
   default_hero(std::string_view id) {
-    if (id == desktop_id) return "desktop-hero.png";
-    if (id == steam_id) return "steam-hero.png";
-    if (id == xbox_id) return "box-hero.png";
+    if (id == desktop_id) return "desktop-hero.webp";
+    if (id == steam_id) return "steam-hero.webp";
+    if (id == xbox_id) return "box-hero.webp";
     if (id == big_screen_id) return std::string { big_screen_hero };
     return {};
   }

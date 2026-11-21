@@ -1,6 +1,7 @@
 #!/bin/sh
-# Regenerates every PNG from the SVG sources in ./svg (deterministic; rsvg-convert + Pillow optimize).
-# Usage: sh render.sh   (run from anywhere; final PNGs are written next to this script)
+# Regenerates the posters (PNG) and landscape covers (WebP) from the SVG sources in ./svg
+# (deterministic; rsvg-convert + Pillow; the covers are WebP quality 92, method 6).
+# Usage: sh render.sh   (run from anywhere; final files are written next to this script)
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$HERE/png"  # raw intermediates; finals are written to $HERE
@@ -19,8 +20,13 @@ from PIL import Image
 d = sys.argv[1]
 for raw in sorted(glob.glob(os.path.join(d, '*.raw.png'))):
     im = Image.open(raw).convert('RGB')
-    out = os.path.join(os.path.dirname(d), os.path.basename(raw).replace('.raw.png', '.png'))
-    im.save(out, optimize=True, compress_level=9)
+    name = os.path.basename(raw).replace('.raw.png', '')
+    if name.endswith('-hero'):
+        out = os.path.join(os.path.dirname(d), name + '.webp')
+        im.save(out, 'WEBP', quality=92, method=6)
+    else:
+        out = os.path.join(os.path.dirname(d), name + '.png')
+        im.save(out, optimize=True, compress_level=9)
     os.remove(raw)
     print(os.path.basename(out), im.size, os.path.getsize(out))
 PY
