@@ -2,11 +2,15 @@ import i18n from './config/i18n.js'
 import { markWebUiReady } from './utils/appReady.js'
 import { installExternalLinkHandler } from './utils/helpers.js'
 import { registerModeHandler } from 'foundation-ui/vue/useAppearance.js'
+import { registerViviAssets } from 'foundation-ui/brand-assets'
 import { configureDevBackend } from 'foundation-ui/devmode/config.js'
 import { applyDevBackend } from './devBackendConfig.js'
 import { setStoredTheme, setTheme } from './utils/theme.js'
 import { installSessionGuard } from './utils/sessionGuard.js'
 import { setPlatformI18n } from './platform-i18n.js'
+
+// 薇薇 and her wallpapers: the library draws none until a product registers them, and every page of the Web UI starts here
+registerViviAssets()
 
 // the GitHub flows of developer mode (sign-in, Issue 与 PR, feedback under the person's name) have their backend from here on
 applyDevBackend(configureDevBackend)

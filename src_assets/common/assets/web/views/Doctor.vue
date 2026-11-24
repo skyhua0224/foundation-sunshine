@@ -1,6 +1,7 @@
 <template>
   <div class="m-app m-root doctor-page">
     <MDoctor
+      :product="PRODUCT_NAME"
       :request="usbRoot.request(request)"
       :repair="usbRoot.repair"
       :can-repair="usbRoot.canRepair"
@@ -36,6 +37,7 @@
 import { inject, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MDoctor } from 'foundation-ui/vue'
+import { PRODUCT_NAME } from '../config/brand.js'
 import LogDiagnosisModal from '../components/LogDiagnosisModal.vue'
 import { useAiDiagnosis } from '../composables/useAiDiagnosis.js'
 import { createUsbRootDoctor } from '../composables/useUsbRootDoctor.js'

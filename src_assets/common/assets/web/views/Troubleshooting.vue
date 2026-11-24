@@ -1,6 +1,7 @@
 <template>
   <div class="m-app m-root troubleshooting-page">
     <MDiagnostics
+      :product="PRODUCT_NAME"
       :title="diagnosticsTexts(String(locale)).title"
       :text="diag.text.value"
       v-model:live="diag.live.value"
@@ -79,6 +80,7 @@
 <script setup>
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { PRODUCT_NAME } from '../config/brand.js'
 import { MDiagnostics, MButton, MRemoteWindow, coachTexts, guideTexts, homeTexts, remoteTexts, diagnosticsTexts, useGuideCard } from 'foundation-ui/vue'
 import { useGuide } from '../composables/useGuide.js'
 import HelpPromos from '../components/common/HelpPromos.vue'

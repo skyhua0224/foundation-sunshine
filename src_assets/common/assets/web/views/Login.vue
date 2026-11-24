@@ -1,11 +1,12 @@
 <template>
-  <div class="m-app m-root"><MLoginPage :client="client" :locale="lang" :next="next" :languages="languages" :links="links" @language="chooseLanguage" @done="go" /></div>
+  <div class="m-app m-root"><MLoginPage :name="PRODUCT_NAME" :client="client" :locale="lang" :next="next" :languages="languages" :links="links" @language="chooseLanguage" @done="go" /></div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import MLoginPage from 'foundation-ui/vue/MLoginPage.vue'
+import { PRODUCT_NAME } from '../config/brand.js'
 import '@material/web/textfield/outlined-text-field.js'
 import '@material/web/checkbox/checkbox.js'
 import { BILIBILI, PRODUCT, PROJECT_LINKS, brandUrl } from 'foundation-ui/about'
